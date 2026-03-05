@@ -1,7 +1,7 @@
 {
   "name": "@agnt-sdk/client",
-  "version": "0.0.1",
-  "description": "Typed API client for the Agnt platform \u2014 chats, tasks, memories, contacts, users, assistants and more",
+  "version": "0.0.2",
+  "description": "Typed API client for the Agnt platform — chats, tasks, memories, contacts, users, assistants and more",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
