@@ -1,0 +1,76 @@
+{
+  "name": "@agnt-sdk/studio",
+  "version": "0.0.1",
+  "description": "V2 manifest-based LLM executor for agnt prompts with CLI",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "agnt": "./dist/cli/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+"test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rm -rf dist coverage",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "llm",
+    "executor",
+    "agent",
+    "agnt",
+    "anthropic",
+    "openai",
+    "bedrock",
+    "deepseek",
+    "google",
+    "gemini",
+    "cli",
+    "prompt-manifest"
+  ],
+  "author": "Agnt",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agnt-ai/agnt-node.git",
+    "directory": "packages/studio"
+  },
+  "homepage": "https://github.com/agnt-ai/agnt-node/tree/main/packages/studio#readme",
+  "bugs": {
+    "url": "https://github.com/agnt-ai/agnt-node/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@agnt-sdk/config": "*",
+    "@anthropic-ai/sdk": "^0.32.1",
+    "@aws-sdk/client-bedrock-runtime": "^3.705.0",
+    "@google/generative-ai": "^0.24.1",
+    "commander": "^12.1.0",
+    "openai": "^4.77.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^2.1.8",
+    "typescript": "^5.3.3",
+    "vitest": "^2.1.8"
+  }
+}

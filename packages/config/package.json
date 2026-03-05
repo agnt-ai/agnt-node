@@ -1,0 +1,55 @@
+{
+  "name": "@agnt-sdk/config",
+  "version": "0.0.1",
+  "description": "Shared configuration loader for @agnt-sdk packages",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Agnt",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agnt-ai/agnt-node.git",
+    "directory": "packages/config"
+  },
+  "homepage": "https://github.com/agnt-ai/agnt-node/tree/main/packages/config#readme",
+  "bugs": {
+    "url": "https://github.com/agnt-ai/agnt-node/issues"
+  },
+  "keywords": [
+    "agnt",
+    "config",
+    "typescript"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^2.1.8",
+    "typescript": "^5.3.3",
+    "vitest": "^2.1.8"
+  }
+}

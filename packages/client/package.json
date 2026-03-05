@@ -1,0 +1,62 @@
+{
+  "name": "@agnt-sdk/client",
+  "version": "0.0.1",
+  "description": "Typed API client for the Agnt platform \u2014 chats, tasks, memories, contacts, users, assistants and more",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:live": "vitest run --config vitest.live.config.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Agnt",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agnt-ai/agnt-node.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/agnt-ai/agnt-node/tree/main/packages/client#readme",
+  "bugs": {
+    "url": "https://github.com/agnt-ai/agnt-node/issues"
+  },
+  "keywords": [
+    "agnt",
+    "api-client",
+    "tasks",
+    "ai-assistant",
+    "typescript"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@agnt-sdk/config": "*",
+    "jose": "^5.9.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^2.1.8",
+    "typescript": "^5.3.3",
+    "vitest": "^2.1.8"
+  }
+}
