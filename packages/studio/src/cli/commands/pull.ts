@@ -53,7 +53,7 @@ export async function runPull(address?: string): Promise<void> {
     for (const p of prompts) {
       try {
         const manifest = await client.getManifest(accountSlug, p.name);
-        await saveManifest(manifest, p.name, outputDir, writeFile, join);
+        await saveManifest(manifest, accountSlug, p.name, outputDir, writeFile, join, mkdir);
         console.log(`  ✓ ${accountSlug}/${p.name}`);
         saved++;
       } catch (err: any) {
@@ -78,20 +78,23 @@ export async function runPull(address?: string): Promise<void> {
       process.exit(1);
     }
 
-    await saveManifest(manifest, promptSlug, outputDir, writeFile, join);
-    console.log(`Pulled ${address} → ${config.outputDir}/${promptSlug}.json`);
+    await saveManifest(manifest, accountSlug, promptSlug, outputDir, writeFile, join, mkdir);
+    console.log(`Pulled ${address} → ${config.outputDir}/${accountSlug}/${promptSlug}.json`);
   }
 }
 
 async function saveManifest(
   manifest: PromptManifestV2,
+  accountSlug: string,
   promptSlug: string,
   outputDir: string,
   writeFile: typeof import('fs/promises').writeFile,
-  join: typeof import('path').join
+  join: typeof import('path').join,
+  mkdir: typeof import('fs/promises').mkdir
 ): Promise<void> {
-  const filename = promptSlug.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
-  const filePath = join(outputDir, `${filename}.json`);
+  const accountDir = join(outputDir, accountSlug);
+  await mkdir(accountDir, { recursive: true });
+  const filePath = join(accountDir, `${promptSlug}.json`);
   const payload = { manifest, pulledAt: new Date().toISOString() };
   await writeFile(filePath, JSON.stringify(payload, null, 2), 'utf-8');
 }

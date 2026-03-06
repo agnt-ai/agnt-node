@@ -84,7 +84,7 @@ export class AgntExecutor {
 
     const manifest = useApi
       ? await this.loadFromApi(accountSlug, promptSlug)
-      : await this.loadFromFile(promptSlug);
+      : await this.loadFromFile(accountSlug, promptSlug);
 
     const tracingConfig: TracingConfig | undefined = options?.tracing ? {
       enabled: options.tracing.enabled,
@@ -130,7 +130,7 @@ export class AgntExecutor {
     return this.client.getManifest(accountSlug, promptSlug);
   }
 
-  private async loadFromFile(promptSlug: string): Promise<PromptManifestV2> {
+  private async loadFromFile(accountSlug: string, promptSlug: string): Promise<PromptManifestV2> {
     if (typeof process === 'undefined' || !process.versions?.node) {
       throw new Error('File mode is only supported in Node.js. Use apiMode: true for browser.');
     }
@@ -138,9 +138,8 @@ export class AgntExecutor {
     const { join, resolve } = await import('path');
     const { readFile } = await import('fs/promises');
 
-    const filename = promptSlug.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
     const outputDir = resolve(this.config.outputDir);
-    const filePath = join(outputDir, `${filename}.json`);
+    const filePath = join(outputDir, accountSlug, `${promptSlug}.json`);
 
     try {
       const content = await readFile(filePath, 'utf-8');
@@ -151,7 +150,7 @@ export class AgntExecutor {
       if (err.code === 'ENOENT') {
         throw new Error(
           `Prompt file not found: ${filePath}\n` +
-          `Run 'agnt pull ${promptSlug}' to download it.`
+          `Run 'agnt pull ${accountSlug}/${promptSlug}' to download it.`
         );
       }
       throw err;

@@ -37,6 +37,7 @@ export default class BaseExecutor {
   protected toolRouter: ToolRouter;
   protected credentials: any;
   protected log: (message: string, ...args: any[]) => void;
+  protected debug: (message: string, ...args: any[]) => void;
   protected messages: Message[];
   protected onToolCall?: ToolCallCallback;
   protected cancelled: boolean;
@@ -62,6 +63,7 @@ export default class BaseExecutor {
     messages = [],
     onToolCall,
     log = console.log,
+    logLevel = 'info',
     tracing,
     files,
     maxMessages = 50,
@@ -76,7 +78,8 @@ export default class BaseExecutor {
     this.variables = variables;
     this.toolRouter = toolRouter || {};
     this.credentials = credentials || {};
-    this.log = log;
+    this.log = logLevel === 'silent' ? () => {} : log;
+    this.debug = logLevel === 'debug' ? log : () => {};
     this.files = files;
     this.maxMessages = maxMessages;
     this.messages = messages;
@@ -292,6 +295,11 @@ export default class BaseExecutor {
   protected populateTemplate(template: string, variables: Record<string, any>): string {
     if (!template) return '';
     return template.replace(/\{([^}]+)\}/g, (match, key) => {
+      if (key.startsWith('component.')) {
+        const compName = key.slice('component.'.length);
+        const comp = this.manifest.resolvedDependencies?.components?.find(c => c.name === compName);
+        return comp?.content ? this.populateTemplate(comp.content, variables) : match;
+      }
       return variables[key] !== undefined ? String(variables[key]) : match;
     });
   }

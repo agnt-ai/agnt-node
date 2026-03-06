@@ -27,7 +27,12 @@ export class ChatsResource {
   }
 
   async process(chatId: string, body?: { metadata?: Record<string, any> }): Promise<ProcessChatResult> {
-    return this.http.post<ProcessChatResult>(`/chats/${chatId}/process`, body ?? {});
+    const r = await this.http.post<any>(`/chats/${chatId}/process`, body ?? {});
+    // Normalize: suppressed path nests fields under `processing`, happy path has them flat
+    if (r.processing && !r.message) {
+      return { ok: r.ok, ...r.processing };
+    }
+    return r as ProcessChatResult;
   }
 
   messages = {

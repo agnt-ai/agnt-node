@@ -70,6 +70,7 @@ export default class AnthropicExecutor extends BaseExecutor {
     }
 
     // Call Anthropic API
+    this.debug(`[AnthropicExecutor] Final messages payload:\n${JSON.stringify({ system: params.system, messages: params.messages }, null, 2)}`);
     const response = await this.client.messages.create(params);
 
     // Format response to match expected structure

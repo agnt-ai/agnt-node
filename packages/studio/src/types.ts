@@ -118,6 +118,7 @@ export interface BaseExecutorConfig {
   messages?: Message[];
   onToolCall?: ToolCallCallback;
   log?: (message: string, ...args: any[]) => void;
+  logLevel?: 'debug' | 'info' | 'silent';
   executorFactory?: (config: BaseExecutorConfig) => Promise<any>;
   imageCache?: any;
   tracing?: TracingConfig;

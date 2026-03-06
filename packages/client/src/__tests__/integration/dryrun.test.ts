@@ -179,7 +179,7 @@ describe('Chats (delegated)', () => {
     const chat = { id: 'c1', title: 'Book a flight' };
     stubFetch({
       '/chats': { chat },
-      '/chats/c1/process': { response: 'Flight booked!', messages: [] }
+      '/chats/c1/process': { ok: true, message: { id: 'm1', role: 'assistant', content: 'Flight booked!', timestamp: 1700000000000, platform: 'chat', to: [], cc: [] }, taskIds: [] }
     });
 
     const client = await AgntClient.create({ config });
@@ -190,6 +190,10 @@ describe('Chats (delegated)', () => {
 
     const processed = await user.chats.process(created.id);
     expect(lastRequest().url).toContain('/process');
+    expect(processed.ok).toBe(true);
+    expect(processed.message?.content).toBe('Flight booked!');
+    expect(processed.message?.role).toBe('assistant');
+    expect(processed.taskIds).toEqual([]);
   });
 
   it('messages.add then messages.list', async () => {

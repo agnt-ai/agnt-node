@@ -269,6 +269,22 @@ describe('6 · Chats', () => {
     expect(result.id).toBeTruthy();
   });
 
+  it('process — runs collector via @agnt-sdk/studio', async () => {
+    const result = await user.chats.process(chatId);
+    console.log('  process result:', JSON.stringify(result, null, 2));
+    expect(result.ok).toBe(true);
+    if (result.message) {
+      console.log('  assistant reply:', String(result.message.content).slice(0, 120));
+      console.log('  taskIds:', result.taskIds);
+      expect(result.message.id).toBeTruthy();
+      expect(result.message.role).toBe('assistant');
+    } else {
+      // suppressed / ignored path
+      console.log('  suppressed:', result.suppressed, '  ignored:', result.ignored);
+      console.log('  taskIds:', result.taskIds);
+    }
+  });
+
   it('list messages', async () => {
     const result = await user.chats.messages.list(chatId);
     console.log('  messages:', result.items.map((m: any) => `${m.role}: ${String(m.content).slice(0, 40)}`));
