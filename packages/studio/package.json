@@ -1,6 +1,6 @@
 {
   "name": "@agnt-sdk/studio",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "V2 manifest-based LLM executor for agnt prompts with CLI",
   "type": "module",
   "main": "./dist/index.js",
@@ -29,7 +29,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist coverage",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build && chmod +x dist/cli/index.js"
   },
   "keywords": [
     "llm",
