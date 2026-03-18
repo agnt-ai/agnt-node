@@ -26,6 +26,21 @@ export { evaluateCondition } from './conditions.js';
 // ── System tool registry ──────────────────────────────────────────────────────
 export { SYSTEM_TOOL_NAMES } from './systemTools.js';
 
+// ── Hooks ────────────────────────────────────────────────────────────────────
+export { HookRegistry, type HookEvent, type HookHandler } from './hooks.js';
+
+// ── OpenClaw interop ─────────────────────────────────────────────────────────
+export {
+  isOpenClawResult,
+  fromOpenClawResult,
+  toOpenClawResult,
+  adaptOpenClawTool,
+  normalizeToolResult,
+  type OpenClawToolResult,
+  type OpenClawToolDefinition,
+  type OpenClawContentBlock,
+} from './openclawAdapter.js';
+
 // ── API Client & Config ───────────────────────────────────────────────────────
 export { AgntApiClient, type AgntApiOptions, type PulledPrompt } from './cli/utils/api.js';
 export { loadConfig } from './cli/utils/config.js';

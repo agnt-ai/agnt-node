@@ -30,6 +30,8 @@ import type {
 import { evaluateCondition } from './conditions.js';
 import { sendTrace } from './tracing.js';
 import { SYSTEM_TOOL_NAMES } from './systemTools.js';
+import { normalizeToolResult } from './openclawAdapter.js';
+import type { HookRegistry } from './hooks.js';
 
 export default class BaseExecutor {
   protected manifest: PromptManifestV2;
@@ -54,6 +56,7 @@ export default class BaseExecutor {
   protected maxMessages: number;
   protected modelPricing?: ModelPricing;
   protected initialToolChoice: 'auto' | 'required' | 'none' | string;
+  protected hooks?: HookRegistry;
 
   constructor({
     manifest,
@@ -62,6 +65,7 @@ export default class BaseExecutor {
     credentials,
     messages = [],
     onToolCall,
+    hooks,
     log = console.log,
     logLevel = 'info',
     tracing,
@@ -88,6 +92,7 @@ export default class BaseExecutor {
     this.toolErrorCount = {};
     this.forceNextTool = undefined;
     this.tracing = tracing;
+    this.hooks = hooks;
     this.executorFactory = executorFactory;
 
     // Select primary model from spec (respects routing strategy + conditions)
@@ -376,7 +381,28 @@ export default class BaseExecutor {
 
   async execute(): Promise<ExecutionResult> {
     try {
+      // Fire before_agent_start hook
+      if (this.hooks?.has('before_agent_start')) {
+        await this.hooks.fire('before_agent_start', {
+          manifest: this.manifest,
+          variables: this.variables,
+        });
+      }
+
       this.validateVariables();
+
+      // Fire before_prompt_build hook — can prepend/append to system prompt
+      if (this.hooks?.has('before_prompt_build')) {
+        const hookResult = await this.hooks.fire('before_prompt_build', {
+          instructions: this.instructions,
+          variables: this.variables,
+        });
+        if (hookResult) {
+          if (hookResult.prepend) this.instructions = hookResult.prepend + '\n\n' + this.instructions;
+          if (hookResult.append) this.instructions = this.instructions + '\n\n' + hookResult.append;
+          if (hookResult.instructions) this.instructions = hookResult.instructions;
+        }
+      }
 
       if (this.messages.length === 0) {
         this.messages = this.buildInitialMessages();
@@ -434,6 +460,11 @@ export default class BaseExecutor {
         output = result.message.tool_calls[0].args;
       } else {
         output = result.message.content;
+      }
+
+      // Fire agent_end hook
+      if (this.hooks?.has('agent_end')) {
+        await this.hooks.fire('agent_end', { result: output, usage, cancelled: this.cancelled });
       }
 
       return { ok: !this.cancelled, usage, result: output, messages: this.messages };
@@ -544,6 +575,23 @@ export default class BaseExecutor {
       this.log(`[BaseExecutor] Executing tool: ${tc.name}`);
       let toolResult: any;
 
+      // Fire before_tool_call hook — can block or modify args
+      if (this.hooks?.has('before_tool_call')) {
+        const hookResult = await this.hooks.fire('before_tool_call', {
+          name: tc.name,
+          args: tc.args,
+          source: tc.source,
+        });
+        if (hookResult?.block) {
+          toolResult = { completed: false, error: true, message: hookResult.reason ?? 'Blocked by hook' };
+          results.push({ tool_call_id: tc.id, content: toolResult });
+          continue;
+        }
+        if (hookResult?.args) {
+          tc.args = hookResult.args;
+        }
+      }
+
       if (tc.name === 'finish_agent_run') {
         const handler = this.toolRouter[tc.name];
         if (handler) {
@@ -562,6 +610,8 @@ export default class BaseExecutor {
         } else {
           try {
             toolResult = await handler.execute(tc.args);
+            // Normalize OpenClaw-format results ({ content: [{type, text}] }) to AGNT format
+            toolResult = normalizeToolResult(toolResult);
             this.toolErrorCount[tc.name] = 0;
           } catch (err: any) {
             this.toolErrorCount[tc.name] = (this.toolErrorCount[tc.name] || 0) + 1;
@@ -569,6 +619,16 @@ export default class BaseExecutor {
             toolResult = { completed: false, error: true, message: 'Tool error. Please try a different approach.' };
           }
         }
+      }
+
+      // Fire after_tool_call hook (observability)
+      if (this.hooks?.has('after_tool_call')) {
+        await this.hooks.fire('after_tool_call', {
+          name: tc.name,
+          args: tc.args,
+          result: toolResult,
+          source: tc.source,
+        });
       }
 
       results.push({ tool_call_id: tc.id, content: toolResult, forceNextTool: toolResult?.forceNextTool });

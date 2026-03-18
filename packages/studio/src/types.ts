@@ -117,6 +117,7 @@ export interface BaseExecutorConfig {
   credentials: ProviderCredentials;
   messages?: Message[];
   onToolCall?: ToolCallCallback;
+  hooks?: import('./hooks.js').HookRegistry;
   log?: (message: string, ...args: any[]) => void;
   logLevel?: 'debug' | 'info' | 'silent';
   executorFactory?: (config: BaseExecutorConfig) => Promise<any>;
@@ -308,6 +309,16 @@ export interface PromptManifestV2 {
   spec: V2Spec;
   resolvedDependencies?: ResolvedDependencies;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenClaw interop types (re-exported from openclawAdapter)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type {
+  OpenClawContentBlock,
+  OpenClawToolResult,
+  OpenClawToolDefinition,
+} from './openclawAdapter.js';
 
 // Shared config — exported from @agnt-sdk/config
 export type { AgntConfig } from '@agnt-sdk/config';
