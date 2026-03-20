@@ -54,8 +54,9 @@ export default class BedrockExecutor extends BaseExecutor {
     const systemContent = systemMessages.map(m => m.content).join('\n\n');
 
     // Build request parameters
+    const modelId = `arn:aws:bedrock:${this.region}::inference-profile/us.${this.model}`;
     const params: any = {
-      modelId: this.model,
+      modelId,
       messages: this.#formatMessages(messages),
       inferenceConfig: {
         maxTokens: providerParams.maxTokens || providerParams.max_tokens || 4096
