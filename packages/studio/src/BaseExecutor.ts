@@ -646,7 +646,7 @@ export default class BaseExecutor {
     turnDuration: number,
     cost: number
   ): Promise<void> {
-    if (!this.tracing) return;
+    if (!this.tracing && !this.hooks?.has('llm_output')) return;
 
     const lastAssistant = [...this.messages].reverse().find(m => m.role === 'assistant');
     const lastIdx = lastAssistant ? this.messages.lastIndexOf(lastAssistant) : -1;
@@ -654,7 +654,7 @@ export default class BaseExecutor {
       ? [...this.messages.slice(0, lastIdx), ...this.messages.slice(lastIdx + 1)]
       : this.messages;
 
-    await sendTrace(this.tracing, {
+    const turnPayload = {
       promptName: this.manifest.metadata.name,
       manifest: this.manifest,
       etag: this.manifest.metadata.etag || null,
@@ -669,8 +669,16 @@ export default class BaseExecutor {
       model: { provider: this.provider, name: this.model, metadata: this.primaryModelConfig.metadata || {} },
       status: 'completed',
       metadata: { turnNumber: this.messages.filter(m => m.role === 'assistant').length },
-      tags: this.tracing.tags || []
-    }, this.log);
+      tags: this.tracing?.tags || []
+    };
+
+    if (this.tracing) {
+      await sendTrace(this.tracing, turnPayload, this.log);
+    }
+
+    if (this.hooks?.has('llm_output')) {
+      await this.hooks.fire('llm_output', turnPayload);
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
