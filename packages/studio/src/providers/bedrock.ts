@@ -138,19 +138,28 @@ export default class BedrockExecutor extends BaseExecutor {
 
       // Handle tool messages
       if (msg.role === 'tool') {
+        let toolResultContent: any;
+        if (typeof msg.content === 'string') {
+          try {
+            const parsed = JSON.parse(msg.content);
+            toolResultContent = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+              ? { json: parsed }
+              : { text: msg.content };
+          } catch {
+            toolResultContent = { text: msg.content };
+          }
+        } else if (msg.content !== null && typeof msg.content === 'object' && !Array.isArray(msg.content)) {
+          toolResultContent = { json: msg.content };
+        } else {
+          toolResultContent = { text: String(msg.content ?? '') };
+        }
         formatted.push({
           role: 'user',
           content: [
             {
               toolResult: {
                 toolUseId: msg.tool_call_id,
-                content: [
-                  {
-                    json: typeof msg.content === 'string'
-                      ? JSON.parse(msg.content)
-                      : msg.content
-                  }
-                ]
+                content: [toolResultContent]
               }
             }
           ]
