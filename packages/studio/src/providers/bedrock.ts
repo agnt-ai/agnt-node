@@ -159,13 +159,40 @@ export default class BedrockExecutor extends BaseExecutor {
       }
 
       // Handle user/assistant messages
-      const content = typeof msg.content === 'string'
-        ? [{ text: msg.content }]
-        : this.#formatContent(msg.content);
+      const contentBlocks: any[] = [];
+
+      // Add text content if non-empty
+      const textContent = typeof msg.content === 'string'
+        ? msg.content
+        : null;
+      if (textContent) {
+        contentBlocks.push(...(typeof msg.content === 'string'
+          ? [{ text: msg.content }]
+          : this.#formatContent(msg.content)));
+      } else if (msg.content && typeof msg.content !== 'string') {
+        contentBlocks.push(...this.#formatContent(msg.content));
+      }
+
+      // Add tool call blocks for assistant messages
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        for (const tc of msg.tool_calls) {
+          contentBlocks.push({
+            toolUse: {
+              toolUseId: tc.id,
+              name: tc.name,
+              input: tc.args || {}
+            }
+          });
+        }
+      }
+
+      if (contentBlocks.length === 0) {
+        contentBlocks.push({ text: ' ' });
+      }
 
       formatted.push({
         role: msg.role,
-        content
+        content: contentBlocks
       });
     }
 
