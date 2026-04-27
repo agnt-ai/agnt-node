@@ -48,10 +48,11 @@ export default class AnthropicExecutor extends BaseExecutor {
     const params: any = {
       model: this.model,
       max_tokens: providerParams.max_tokens || providerParams.maxTokens || 4096,
-      cache_control: { type: 'ephemeral' },
       messages: this.#formatMessages(messages),
       ...providerParams // Spread all provider-specific params
     };
+    // Set after spread so model metadata can't accidentally override it
+    params.cache_control = { type: 'ephemeral' };
 
     // Add system parameter if we have system messages
     if (systemContent) {
