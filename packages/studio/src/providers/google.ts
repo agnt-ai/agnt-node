@@ -108,7 +108,8 @@ export default class GoogleExecutor extends BaseExecutor {
     const thoughtsTokens = metadata?.thoughtsTokenCount || 0;
     const usage = {
       input_tokens: response.usageMetadata?.promptTokenCount || 0,
-      output_tokens: (response.usageMetadata?.candidatesTokenCount || 0) + thoughtsTokens
+      output_tokens: (response.usageMetadata?.candidatesTokenCount || 0) + thoughtsTokens,
+      cache_read_input_tokens: metadata?.cachedContentTokenCount ?? 0
     };
 
     // Format response to match expected structure

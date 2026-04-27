@@ -80,7 +80,8 @@ export default class OpenAIExecutor extends BaseExecutor {
       },
       usage: {
         input_tokens: response.usage!.prompt_tokens,
-        output_tokens: response.usage!.completion_tokens
+        output_tokens: response.usage!.completion_tokens,
+        cache_read_input_tokens: (response.usage as any)?.prompt_tokens_details?.cached_tokens ?? 0
       }
     };
   }

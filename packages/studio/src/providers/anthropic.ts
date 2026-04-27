@@ -48,6 +48,7 @@ export default class AnthropicExecutor extends BaseExecutor {
     const params: any = {
       model: this.model,
       max_tokens: providerParams.max_tokens || providerParams.maxTokens || 4096,
+      cache_control: { type: 'ephemeral' },
       messages: this.#formatMessages(messages),
       ...providerParams // Spread all provider-specific params
     };
@@ -82,7 +83,9 @@ export default class AnthropicExecutor extends BaseExecutor {
       },
       usage: {
         input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens
+        output_tokens: response.usage.output_tokens,
+        cache_read_input_tokens: (response.usage as any).cache_read_input_tokens ?? 0,
+        cache_creation_input_tokens: (response.usage as any).cache_creation_input_tokens ?? 0
       }
     };
   }
