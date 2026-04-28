@@ -72,6 +72,9 @@ export default class OpenAIExecutor extends BaseExecutor {
     const message = choice.message;
 
     // Format response to match expected structure
+    const usageTyped = response.usage as typeof response.usage & {
+      prompt_tokens_details?: { cached_tokens?: number };
+    };
     return {
       message: {
         role: message.role,
@@ -81,7 +84,8 @@ export default class OpenAIExecutor extends BaseExecutor {
       usage: {
         input_tokens: response.usage!.prompt_tokens,
         output_tokens: response.usage!.completion_tokens,
-        cache_read_input_tokens: (response.usage as any)?.prompt_tokens_details?.cached_tokens ?? 0
+        cache_read_input_tokens: usageTyped?.prompt_tokens_details?.cached_tokens ?? 0,
+        cache_creation_input_tokens: 0
       }
     };
   }
