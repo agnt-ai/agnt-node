@@ -51,6 +51,8 @@ export default class AnthropicExecutor extends BaseExecutor {
       messages: this.#formatMessages(messages),
       ...providerParams // Spread all provider-specific params
     };
+    // Set after spread so model metadata can't accidentally override it
+    params.cache_control = { type: 'ephemeral' };
 
     // Add system parameter if we have system messages
     if (systemContent) {
@@ -74,6 +76,10 @@ export default class AnthropicExecutor extends BaseExecutor {
     const response = await this.client.messages.create(params);
 
     // Format response to match expected structure
+    const usageTyped = response.usage as typeof response.usage & {
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
     return {
       message: {
         role: 'assistant',
@@ -82,7 +88,9 @@ export default class AnthropicExecutor extends BaseExecutor {
       },
       usage: {
         input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens
+        output_tokens: response.usage.output_tokens,
+        cache_read_input_tokens: usageTyped.cache_read_input_tokens ?? 0,
+        cache_creation_input_tokens: usageTyped.cache_creation_input_tokens ?? 0
       }
     };
   }
