@@ -54,6 +54,7 @@ export default class BaseExecutor {
   protected tracing?: TracingConfig;
   protected files?: Array<any>;
   protected maxMessages: number;
+  protected _initialMessageCount: number = 0;
   protected modelPricing?: ModelPricing;
   protected initialToolChoice: 'auto' | 'required' | 'none' | string;
   protected hooks?: HookRegistry;
@@ -87,6 +88,8 @@ export default class BaseExecutor {
     this.files = files;
     this.maxMessages = maxMessages;
     this.messages = messages;
+    // maxMessages limits only NEW tool-turn messages, not pre-existing conversation history.
+    this._initialMessageCount = messages.length;
     this.onToolCall = onToolCall;
     this.cancelled = false;
     this.toolErrorCount = {};
@@ -490,9 +493,9 @@ export default class BaseExecutor {
     while (this.hasToolCalls(message)) {
       if (this.cancelled) break;
 
-      if (this.messages.length >= this.maxMessages) {
+      if ((this.messages.length - this._initialMessageCount) >= this.maxMessages) {
         throw new Error(
-          `[BaseExecutor] Message stack exceeded ${this.maxMessages} messages. ` +
+          `[BaseExecutor] Message stack exceeded ${this.maxMessages} new messages. ` +
           'Agent must call finish_agent_run to complete.'
         );
       }
