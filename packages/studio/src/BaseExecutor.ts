@@ -371,13 +371,36 @@ export default class BaseExecutor {
   // Pricing
   // ─────────────────────────────────────────────────────────────────────────────
 
-  protected calculateCost(inputTokens: number, outputTokens: number): number {
-    if (this.modelPricing) {
-      return (inputTokens / 1_000_000) * this.modelPricing.inputTokensPer1M +
-             (outputTokens / 1_000_000) * this.modelPricing.outputTokensPer1M;
+  // Sum all input token variants from a usage object.
+  // Anthropic splits into input_tokens (uncached), cache_creation_input_tokens,
+  // and cache_read_input_tokens. All three must be counted.
+  protected sumInputTokens(usage: { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } | undefined | null): number {
+    if (!usage) return 0;
+    return (usage.input_tokens || 0) +
+           (usage.cache_creation_input_tokens || 0) +
+           (usage.cache_read_input_tokens || 0);
+  }
+
+  // Calculate cost in USD. Uses cache-aware pricing when cache fields present.
+  // Cache creation: 1.25× input rate. Cache read: 0.1× input rate.
+  protected calculateCost(
+    inputTokensOrUsage: number | { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number },
+    outputTokens: number
+  ): number {
+    const inRate  = this.modelPricing?.inputTokensPer1M  ?? 3;
+    const outRate = this.modelPricing?.outputTokensPer1M ?? 15;
+
+    let costUSD = (outputTokens / 1_000_000) * outRate;
+
+    if (typeof inputTokensOrUsage === 'number') {
+      costUSD += (inputTokensOrUsage / 1_000_000) * inRate;
+    } else {
+      const u = inputTokensOrUsage;
+      costUSD += ((u.input_tokens || 0) / 1_000_000) * inRate;
+      costUSD += ((u.cache_creation_input_tokens || 0) / 1_000_000) * inRate * 1.25;
+      costUSD += ((u.cache_read_input_tokens || 0) / 1_000_000) * inRate * 0.1;
     }
-    // Default: Claude Sonnet pricing
-    return (inputTokens / 1_000_000) * 3 + (outputTokens / 1_000_000) * 15;
+    return costUSD;
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -425,11 +448,11 @@ export default class BaseExecutor {
       const turnDuration = Date.now() - turnStart;
 
       const usage: Usage = {
-        inputTokens: result.usage?.input_tokens || 0,
+        inputTokens: this.sumInputTokens(result.usage),
         outputTokens: result.usage?.output_tokens || 0,
         totalCostUSD: 0
       };
-      usage.totalCostUSD = this.calculateCost(usage.inputTokens, usage.outputTokens);
+      usage.totalCostUSD = this.calculateCost(result.usage ?? 0, usage.outputTokens);
 
       this.messages.push(result.message);
       await this.sendTurnTrace(result.usage || { input_tokens: 0, output_tokens: 0 }, turnDuration, usage.totalCostUSD);
@@ -558,14 +581,14 @@ export default class BaseExecutor {
       const result = await this.invoke(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice });
       const turnDuration = Date.now() - turnStart;
 
-      usage.inputTokens += result.usage?.input_tokens || 0;
+      usage.inputTokens += this.sumInputTokens(result.usage);
       usage.outputTokens += result.usage?.output_tokens || 0;
       usage.totalCostUSD = this.calculateCost(usage.inputTokens, usage.outputTokens);
 
       message = result.message;
       this.messages.push(message);
 
-      const turnCost = this.calculateCost(result.usage?.input_tokens || 0, result.usage?.output_tokens || 0);
+      const turnCost = this.calculateCost(result.usage ?? 0, result.usage?.output_tokens || 0);
       await this.sendTurnTrace(result.usage || { input_tokens: 0, output_tokens: 0 }, turnDuration, turnCost);
     }
 
