@@ -16,6 +16,8 @@ export interface TracePayload {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
   cost: number;
   duration: number;
   model: {
