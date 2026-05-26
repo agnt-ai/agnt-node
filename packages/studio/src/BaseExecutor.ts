@@ -675,7 +675,7 @@ export default class BaseExecutor {
   // ─────────────────────────────────────────────────────────────────────────────
 
   protected async sendTurnTrace(
-    turnUsage: { input_tokens: number; output_tokens: number },
+    turnUsage: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } | null | undefined,
     turnDuration: number,
     cost: number
   ): Promise<void> {
@@ -687,6 +687,9 @@ export default class BaseExecutor {
       ? [...this.messages.slice(0, lastIdx), ...this.messages.slice(lastIdx + 1)]
       : this.messages;
 
+    const totalInput  = this.sumInputTokens(turnUsage);
+    const totalOutput = turnUsage?.output_tokens || 0;
+
     const turnPayload = {
       promptName: this.manifest.metadata.name,
       manifest: this.manifest,
@@ -694,9 +697,12 @@ export default class BaseExecutor {
       variables: this.variables,
       messages: messagesWithoutOutput.slice(2),
       output: lastAssistant || null,
-      inputTokens: turnUsage.input_tokens,
-      outputTokens: turnUsage.output_tokens,
-      totalTokens: turnUsage.input_tokens + turnUsage.output_tokens,
+      inputTokens:  totalInput,
+      outputTokens: totalOutput,
+      totalTokens:  totalInput + totalOutput,
+      // Cache breakdown for observability
+      cacheCreationTokens: turnUsage?.cache_creation_input_tokens || 0,
+      cacheReadTokens:     turnUsage?.cache_read_input_tokens     || 0,
       cost,
       duration: turnDuration,
       model: { provider: this.provider, name: this.model, metadata: this.primaryModelConfig.metadata || {} },
