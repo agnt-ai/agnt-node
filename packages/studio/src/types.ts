@@ -109,6 +109,8 @@ export interface ModelPricing {
   name: string;
   inputTokensPer1M: number;
   outputTokensPer1M: number;
+  cacheCreationTokensPer1M?: number | null;
+  cacheReadTokensPer1M?: number | null;
   currency: string;
 }
 

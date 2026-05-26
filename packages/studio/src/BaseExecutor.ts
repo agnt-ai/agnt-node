@@ -381,14 +381,19 @@ export default class BaseExecutor {
            (usage.cache_read_input_tokens || 0);
   }
 
-  // Calculate cost in USD. Uses cache-aware pricing when cache fields present.
-  // Cache creation: 1.25× input rate. Cache read: 0.1× input rate.
+  // Calculate cost in USD using per-model rates from the pricing catalog.
+  // When a raw usage object is passed, applies the correct rate for each
+  // token type (regular, cache creation, cache read).
   protected calculateCost(
     inputTokensOrUsage: number | { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number },
     outputTokens: number
   ): number {
-    const inRate  = this.modelPricing?.inputTokensPer1M  ?? 3;
-    const outRate = this.modelPricing?.outputTokensPer1M ?? 15;
+    const p = this.modelPricing;
+    const inRate      = p?.inputTokensPer1M          ?? 3;
+    const outRate     = p?.outputTokensPer1M         ?? 15;
+    // Fall back to Anthropic standard multipliers if catalog rates not seeded yet
+    const createRate  = p?.cacheCreationTokensPer1M  ?? inRate * 1.25;
+    const readRate    = p?.cacheReadTokensPer1M      ?? inRate * 0.10;
 
     let costUSD = (outputTokens / 1_000_000) * outRate;
 
@@ -396,9 +401,9 @@ export default class BaseExecutor {
       costUSD += (inputTokensOrUsage / 1_000_000) * inRate;
     } else {
       const u = inputTokensOrUsage;
-      costUSD += ((u.input_tokens || 0) / 1_000_000) * inRate;
-      costUSD += ((u.cache_creation_input_tokens || 0) / 1_000_000) * inRate * 1.25;
-      costUSD += ((u.cache_read_input_tokens || 0) / 1_000_000) * inRate * 0.1;
+      costUSD += ((u.input_tokens                 || 0) / 1_000_000) * inRate;
+      costUSD += ((u.cache_creation_input_tokens  || 0) / 1_000_000) * createRate;
+      costUSD += ((u.cache_read_input_tokens      || 0) / 1_000_000) * readRate;
     }
     return costUSD;
   }
