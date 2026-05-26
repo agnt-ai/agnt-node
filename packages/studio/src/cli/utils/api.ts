@@ -6,7 +6,7 @@
  *  - agnt pull CLI command
  */
 
-import type { PromptManifestV2 } from '../../types.js';
+import type { PromptManifestV2, ModelPricing } from '../../types.js';
 
 export interface AgntApiOptions {
   apiUrl: string;
@@ -60,6 +60,20 @@ export class AgntApiClient {
       `/manifests/${accountSlug}/${promptSlug}`
     );
     return data.manifest;
+  }
+
+  /**
+   * Fetch the account's model pricing catalog.
+   * Returns pricing for all enabled models — used by the executor to set
+   * modelPricing so calculateCost() uses real rates instead of hardcoded Sonnet.
+   */
+  async getModels(): Promise<ModelPricing[]> {
+    const data = await this.request<{ models: (ModelPricing & { modelId: string; enabled: boolean })[] }>(
+      '/models',
+      {},
+      true // requires auth
+    );
+    return data.models ?? [];
   }
 
   /**

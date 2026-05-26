@@ -21,6 +21,7 @@ import type {
   ToolCallCallback,
   TracingConfig,
   AgntConfig,
+  ModelPricing,
   Message
 } from './types.js';
 
@@ -86,6 +87,10 @@ export class AgntExecutor {
       ? await this.loadFromApi(accountSlug, promptSlug)
       : await this.loadFromFile(accountSlug, promptSlug);
 
+    // Fetch model pricing so calculateCost() uses correct per-model rates.
+    // Resolved against the model the manifest will actually run.
+    const modelPricing = await this.resolveModelPricing(manifest).catch(() => undefined);
+
     const tracingConfig: TracingConfig | undefined = options?.tracing ? {
       enabled: options.tracing.enabled,
       apiUrl: this.config.apiUrl,
@@ -105,10 +110,39 @@ export class AgntExecutor {
       tracing: tracingConfig,
       files: options?.files,
       initialToolChoice: options?.initialToolChoice,
-      messages: options?.messages
+      messages: options?.messages,
+      modelPricing,
     });
 
     return executor.execute();
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Pricing
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Fetch model pricing from the AGNT API and return the entry matching the
+   * model the manifest will run. Returns undefined if the API is unavailable
+   * or the model isn't in the catalog — calculateCost() falls back gracefully.
+   */
+  private async resolveModelPricing(manifest: PromptManifestV2): Promise<ModelPricing | undefined> {
+    if (!this.config.apiUrl || !this.config.serviceKey) return undefined;
+
+    const models = await this.client.getModels();
+    if (!models.length) return undefined;
+
+    // The primary model name from the manifest (e.g. "claude-sonnet-4-6")
+    const primaryModelName = manifest.spec?.models?.[0]?.model;
+    if (!primaryModelName) return undefined;
+
+    // Match by modelId (exact) or name (display name) — case-insensitive
+    const match = models.find(
+      m => (m as any).modelId?.toLowerCase() === primaryModelName.toLowerCase() ||
+           m.name?.toLowerCase() === primaryModelName.toLowerCase()
+    );
+
+    return match ?? undefined;
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
