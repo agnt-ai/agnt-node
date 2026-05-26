@@ -132,6 +132,11 @@ export interface BaseExecutorConfig {
   }>;
   maxMessages?: number;
   initialToolChoice?: 'auto' | 'required' | 'none' | string;
+  /** Per-model pricing from the account's AiModel catalog.
+   *  When provided, calculateCost() uses these rates instead of the
+   *  hardcoded Sonnet fallback. Supplied by InternalExecutor (from DB)
+   *  or AgntExecutor (from GET /models API). */
+  modelPricing?: ModelPricing;
 }
 
 export interface InvokeOptions {

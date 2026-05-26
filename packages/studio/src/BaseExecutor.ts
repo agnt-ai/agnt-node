@@ -73,7 +73,8 @@ export default class BaseExecutor {
     files,
     maxMessages = 50,
     initialToolChoice,
-    executorFactory
+    executorFactory,
+    modelPricing
   }: BaseExecutorConfig) {
     this.manifest = manifest;
     if (!this.manifest) throw new Error('[BaseExecutor] manifest is required');
@@ -97,6 +98,7 @@ export default class BaseExecutor {
     this.tracing = tracing;
     this.hooks = hooks;
     this.executorFactory = executorFactory;
+    if (modelPricing) this.modelPricing = modelPricing;
 
     // Select primary model from spec (respects routing strategy + conditions)
     const primaryModel = this.selectPrimaryModel();
