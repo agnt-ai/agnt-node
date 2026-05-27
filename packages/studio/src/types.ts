@@ -70,7 +70,9 @@ export interface ToolCallCallback {
 }
 
 export interface Usage {
-  inputTokens: number;
+  inputTokens: number;           // regular (uncached) input tokens
+  cacheCreationTokens: number;   // tokens written to cache (1.25× rate)
+  cacheReadTokens: number;       // tokens read from cache (0.1× rate)
   outputTokens: number;
   totalCostUSD: number;
 }

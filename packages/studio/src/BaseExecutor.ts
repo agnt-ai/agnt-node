@@ -453,9 +453,11 @@ export default class BaseExecutor {
       const turnDuration = Date.now() - turnStart;
 
       const usage: Usage = {
-        inputTokens: this.sumInputTokens(result.usage),
-        outputTokens: result.usage?.output_tokens || 0,
-        totalCostUSD: 0
+        inputTokens:          result.usage?.input_tokens                || 0,
+        cacheCreationTokens:  result.usage?.cache_creation_input_tokens || 0,
+        cacheReadTokens:      result.usage?.cache_read_input_tokens     || 0,
+        outputTokens:         result.usage?.output_tokens               || 0,
+        totalCostUSD:         0,
       };
       usage.totalCostUSD = this.calculateCost(result.usage ?? 0, usage.outputTokens);
 
@@ -505,7 +507,7 @@ export default class BaseExecutor {
     } catch (error: any) {
       return {
         ok: false,
-        usage: { inputTokens: 0, outputTokens: 0, totalCostUSD: 0 },
+        usage: { inputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalCostUSD: 0 },
         result: null,
         messages: this.messages,
         error: error.message
@@ -586,9 +588,16 @@ export default class BaseExecutor {
       const result = await this.invoke(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice });
       const turnDuration = Date.now() - turnStart;
 
-      usage.inputTokens += this.sumInputTokens(result.usage);
-      usage.outputTokens += result.usage?.output_tokens || 0;
-      usage.totalCostUSD = this.calculateCost(usage.inputTokens, usage.outputTokens);
+      usage.inputTokens         += result.usage?.input_tokens                || 0;
+      usage.cacheCreationTokens += result.usage?.cache_creation_input_tokens || 0;
+      usage.cacheReadTokens     += result.usage?.cache_read_input_tokens     || 0;
+      usage.outputTokens        += result.usage?.output_tokens               || 0;
+      // Recalculate with the full per-type breakdown so cache rates are applied correctly
+      usage.totalCostUSD = this.calculateCost({
+        input_tokens:                usage.inputTokens,
+        cache_creation_input_tokens: usage.cacheCreationTokens,
+        cache_read_input_tokens:     usage.cacheReadTokens,
+      }, usage.outputTokens);
 
       message = result.message;
       this.messages.push(message);
