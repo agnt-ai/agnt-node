@@ -453,7 +453,7 @@ export default class BaseExecutor {
       const turnDuration = Date.now() - turnStart;
 
       const usage: Usage = {
-        inputTokens:          result.usage?.input_tokens                || 0,
+        inputTokens:          this.sumInputTokens(result.usage),         // total for display/Trace
         cacheCreationTokens:  result.usage?.cache_creation_input_tokens || 0,
         cacheReadTokens:      result.usage?.cache_read_input_tokens     || 0,
         outputTokens:         result.usage?.output_tokens               || 0,
@@ -588,13 +588,13 @@ export default class BaseExecutor {
       const result = await this.invoke(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice });
       const turnDuration = Date.now() - turnStart;
 
-      usage.inputTokens         += result.usage?.input_tokens                || 0;
+      usage.inputTokens         += this.sumInputTokens(result.usage);              // total for display
       usage.cacheCreationTokens += result.usage?.cache_creation_input_tokens || 0;
       usage.cacheReadTokens     += result.usage?.cache_read_input_tokens     || 0;
       usage.outputTokens        += result.usage?.output_tokens               || 0;
-      // Recalculate with the full per-type breakdown so cache rates are applied correctly
+      // Recalculate with per-type breakdown so cache rates are applied correctly
       usage.totalCostUSD = this.calculateCost({
-        input_tokens:                usage.inputTokens,
+        input_tokens:                usage.inputTokens - usage.cacheCreationTokens - usage.cacheReadTokens,
         cache_creation_input_tokens: usage.cacheCreationTokens,
         cache_read_input_tokens:     usage.cacheReadTokens,
       }, usage.outputTokens);
