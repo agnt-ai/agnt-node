@@ -331,6 +331,82 @@ export default class BaseExecutor {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
+  // Model fallback
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  private isRetryableError(error: any): boolean {
+    // HTTP status codes from Anthropic, OpenAI, Google, etc.
+    if (error?.status === 500) return true; // Internal server error
+    if (error?.status === 529) return true; // Anthropic overloaded
+    if (error?.status === 503) return true; // Service unavailable
+    if (error?.status === 429) return true; // Rate limited — fall back rather than wait
+    // Anthropic SDK typed errors
+    const retryableNames = [
+      'InternalServerError', 'OverloadedError', 'RateLimitError',
+      'APIConnectionError', 'APIConnectionTimeoutError',
+    ];
+    if (retryableNames.includes(error?.constructor?.name)) return true;
+    // Node.js network error codes
+    const networkCodes = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN'];
+    if (networkCodes.includes(error?.code)) return true;
+    // Pattern fallback for providers that don't use typed errors
+    if (/overloaded|rate.?limit|server.?error|internal.?error|timed?.out|connection.?reset/i.test(
+      error?.message ?? ''
+    )) return true;
+    return false;
+  }
+
+  /**
+   * Invoke with automatic model fallback.
+   *
+   * Tries models in fallbackOrder. On a retryable error (5xx, overloaded, rate
+   * limit, network drop) it switches to the next model in the list and retries.
+   * Same-provider fallback (e.g. claude-opus → claude-sonnet) works by updating
+   * this.model in-place; cross-provider fallback requires executorFactory and is
+   * not yet implemented (non-retryable path will throw normally).
+   * Non-retryable errors (4xx auth/validation) are re-thrown immediately.
+   */
+  protected async invokeWithFallback(messages: Message[], options: InvokeOptions): Promise<InvokeResult> {
+    const orderedModels = [...this.manifest.spec.models].sort(
+      (a, b) => (a.fallbackOrder ?? 0) - (b.fallbackOrder ?? 0)
+    );
+
+    let lastError: any;
+
+    for (let i = 0; i < orderedModels.length; i++) {
+      const modelConfig = orderedModels[i];
+
+      if (i > 0) {
+        if (modelConfig.provider !== this.provider) {
+          // Cross-provider fallback requires executorFactory — skip for now.
+          this.log(
+            `[BaseExecutor] Skipping cross-provider fallback to ${modelConfig.provider}/${modelConfig.model} ` +
+            `(executorFactory cross-provider not yet implemented)`
+          );
+          continue;
+        }
+        this.log(`[BaseExecutor] ${orderedModels[i - 1].model} failed — falling back to ${modelConfig.model}`);
+        this.primaryModelConfig = { ...modelConfig, name: modelConfig.model };
+        this.provider = modelConfig.provider;
+        this.model = modelConfig.model;
+      }
+
+      try {
+        return await this.invoke(messages, options);
+      } catch (error: any) {
+        if (this.isRetryableError(error)) {
+          this.log(`[BaseExecutor] ${modelConfig.model} retryable error: ${error.message}`);
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw lastError ?? new Error('[BaseExecutor] All models in the fallback list failed');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
   // Variable validation
   // ─────────────────────────────────────────────────────────────────────────────
 
@@ -446,7 +522,7 @@ export default class BaseExecutor {
       const toolChoice = this.normalizeToolChoice(this.initialToolChoice);
 
       const turnStart = Date.now();
-      const result = await this.invoke(this.messages, {
+      const result = await this.invokeWithFallback(this.messages, {
         tools: enableToolCalls ? this.allToolDefs : [],
         tool_choice: enableToolCalls ? toolChoice : 'none'
       });
@@ -585,7 +661,7 @@ export default class BaseExecutor {
       const toolChoice = this.normalizeToolChoice(toolChoiceStr);
 
       const turnStart = Date.now();
-      const result = await this.invoke(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice });
+      const result = await this.invokeWithFallback(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice });
       const turnDuration = Date.now() - turnStart;
 
       usage.inputTokens         += this.sumInputTokens(result.usage);              // total for display
