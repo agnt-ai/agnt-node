@@ -149,6 +149,10 @@ export interface InvokeOptions {
     type: 'function';
     function: { name: string };
   };
+  /** Skip cache_control on this call. Use for one-shot LLM calls that have
+   *  no follow-up turn to hit the cache — avoids paying the 25% write surcharge
+   *  with zero benefit. Agent/Prime multi-turn runs should NOT set this. */
+  disableCache?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

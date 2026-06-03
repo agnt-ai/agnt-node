@@ -51,8 +51,14 @@ export default class AnthropicExecutor extends BaseExecutor {
       messages: this.#formatMessages(messages),
       ...providerParams // Spread all provider-specific params
     };
-    // Set after spread so model metadata can't accidentally override it
-    params.cache_control = { type: 'ephemeral' };
+    // Set cache_control for multi-turn agent runs (Prime) so the large system
+    // prompt is cached and reused across turns within the 5-min TTL.
+    // One-shot callers (QA, ignore/duplicate checks, etc.) pass disableCache: true
+    // to skip this — they have no follow-up turn to benefit from the cache, so
+    // the write surcharge (~25% on input tokens) is pure waste.
+    if (!options.disableCache) {
+      params.cache_control = { type: 'ephemeral' };
+    }
 
     // Add system parameter if we have system messages
     if (systemContent) {
