@@ -141,6 +141,10 @@ export interface BaseExecutorConfig {
    *  hardcoded Sonnet fallback. Supplied by InternalExecutor (from DB)
    *  or AgntExecutor (from GET /models API). */
   modelPricing?: ModelPricing;
+  /** Skip cache_control on all invoke calls for this executor.
+   *  Use for one-shot calls (QA, analysts, etc.) that have no follow-up
+   *  turn to benefit from a cache hit. */
+  disableCache?: boolean;
 }
 
 export interface InvokeOptions {

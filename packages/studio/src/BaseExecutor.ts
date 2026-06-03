@@ -57,6 +57,7 @@ export default class BaseExecutor {
   protected _initialMessageCount: number = 0;
   protected modelPricing?: ModelPricing;
   protected initialToolChoice: 'auto' | 'required' | 'none' | string;
+  protected disableCache: boolean;
   protected hooks?: HookRegistry;
 
   constructor({
@@ -74,7 +75,8 @@ export default class BaseExecutor {
     maxMessages = 50,
     initialToolChoice,
     executorFactory,
-    modelPricing
+    modelPricing,
+    disableCache = false,
   }: BaseExecutorConfig) {
     this.manifest = manifest;
     if (!this.manifest) throw new Error('[BaseExecutor] manifest is required');
@@ -99,6 +101,7 @@ export default class BaseExecutor {
     this.hooks = hooks;
     this.executorFactory = executorFactory;
     if (modelPricing) this.modelPricing = modelPricing;
+    this.disableCache = disableCache;
 
     // Select primary model from spec (respects routing strategy + conditions)
     const primaryModel = this.selectPrimaryModel();
@@ -524,7 +527,8 @@ export default class BaseExecutor {
       const turnStart = Date.now();
       const result = await this.invokeWithFallback(this.messages, {
         tools: enableToolCalls ? this.allToolDefs : [],
-        tool_choice: enableToolCalls ? toolChoice : 'none'
+        tool_choice: enableToolCalls ? toolChoice : 'none',
+        disableCache: this.disableCache,
       });
       const turnDuration = Date.now() - turnStart;
 
@@ -661,7 +665,7 @@ export default class BaseExecutor {
       const toolChoice = this.normalizeToolChoice(toolChoiceStr);
 
       const turnStart = Date.now();
-      const result = await this.invokeWithFallback(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice });
+      const result = await this.invokeWithFallback(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice, disableCache: this.disableCache });
       const turnDuration = Date.now() - turnStart;
 
       usage.inputTokens         += this.sumInputTokens(result.usage);              // total for display
