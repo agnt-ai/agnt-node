@@ -106,10 +106,19 @@ export default class GoogleExecutor extends BaseExecutor {
     // Include thoughtsTokenCount (Gemini 2.5+) in output tokens since it's generated reasoning
     const metadata = response.usageMetadata as any;
     const thoughtsTokens = metadata?.thoughtsTokenCount || 0;
+    // Google's promptTokenCount INCLUDES cachedContentTokenCount (the cached
+    // count is a subset), unlike Anthropic where input_tokens excludes cache.
+    // Subtract the cached tokens out so input_tokens is the UNCACHED count,
+    // keeping the four usage buckets disjoint across all providers. The pipeline
+    // recovers the inclusive total by summation (input + cache_read +
+    // cache_creation) and charges cost per disjoint bucket — so cache reads must
+    // not also live inside input_tokens or they get charged twice.
+    const cachedTokens = metadata?.cachedContentTokenCount ?? 0;
+    const promptTokens = response.usageMetadata?.promptTokenCount || 0;
     const usage = {
-      input_tokens: response.usageMetadata?.promptTokenCount || 0,
+      input_tokens: Math.max(0, promptTokens - cachedTokens),
       output_tokens: (response.usageMetadata?.candidatesTokenCount || 0) + thoughtsTokens,
-      cache_read_input_tokens: metadata?.cachedContentTokenCount ?? 0,
+      cache_read_input_tokens: cachedTokens,
       cache_creation_input_tokens: 0
     };
 

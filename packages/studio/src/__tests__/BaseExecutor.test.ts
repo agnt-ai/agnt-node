@@ -58,6 +58,13 @@ class TestExecutor extends BaseExecutor {
     return this.renderSection(section);
   }
 
+  testCalculateCost(
+    inputTokensOrUsage: number | { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number },
+    outputTokens: number
+  ) {
+    return this.calculateCost(inputTokensOrUsage, outputTokens);
+  }
+
   getLog() { return this.log; }
   getDebug() { return this.debug; }
 }
@@ -217,5 +224,89 @@ describe('logLevel', () => {
     ex.getLog()('hello');
     ex.getDebug()('verbose');
     expect(log).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// calculateCost — provider-agnostic, cache-aware (four-term formula)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('calculateCost — cache-aware, provider-agnostic', () => {
+  const pricing = {
+    provider: 'anthropic',
+    name: 'claude-sonnet-4-5',
+    inputTokensPer1M: 3,
+    outputTokensPer1M: 15,
+    cacheCreationTokensPer1M: 3.75,
+    cacheReadTokensPer1M: 0.3,
+    currency: 'USD',
+  };
+
+  function exWith(modelPricing?: any) {
+    return new TestExecutor(makeConfig(makeManifest(), { modelPricing, logLevel: 'silent' }));
+  }
+
+  it('prices all four buckets from the catalog rates', () => {
+    const ex = exWith(pricing);
+    const cost = ex.testCalculateCost(
+      { input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 },
+      1_000_000
+    );
+    // 3 + 3.75 + 0.3 + 15 = 22.05
+    expect(cost).toBeCloseTo(22.05, 6);
+  });
+
+  it('a null cache rate contributes 0 (OpenAI-style: no cache-creation charge)', () => {
+    const ex = exWith({
+      provider: 'openai',
+      name: 'gpt-4o',
+      inputTokensPer1M: 2.5,
+      outputTokensPer1M: 10,
+      cacheCreationTokensPer1M: null, // provider does not bill cache creation
+      cacheReadTokensPer1M: 1.25,
+      currency: 'USD',
+    });
+    const cost = ex.testCalculateCost(
+      { input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 },
+      0
+    );
+    // 2.5 (input) + 0 (creation null) + 1.25 (read) = 3.75
+    expect(cost).toBeCloseTo(3.75, 6);
+  });
+
+  it('both cache rates null/undefined ⇒ cache buckets contribute 0', () => {
+    const ex = exWith({
+      provider: 'google',
+      name: 'gemini-2.0',
+      inputTokensPer1M: 1,
+      outputTokensPer1M: 4,
+      cacheCreationTokensPer1M: null,
+      cacheReadTokensPer1M: null,
+      currency: 'USD',
+    });
+    const cost = ex.testCalculateCost(
+      { input_tokens: 2_000_000, cache_creation_input_tokens: 5_000_000, cache_read_input_tokens: 9_000_000 },
+      500_000
+    );
+    // only input + output: 2*1 + 0.5*4 = 4
+    expect(cost).toBeCloseTo(4, 6);
+  });
+
+  it('numeric input form prices input + output only (no cache)', () => {
+    const ex = exWith(pricing);
+    const cost = ex.testCalculateCost(2_000_000, 1_000_000);
+    // 2*3 + 1*15 = 21
+    expect(cost).toBeCloseTo(21, 6);
+  });
+
+  it('does not apply Anthropic cache multipliers when catalog cache rates are absent', () => {
+    // No modelPricing at all → input/output safety defaults (3/15) apply,
+    // but cache rates must be 0, NOT inRate*1.25 / inRate*0.10.
+    const ex = exWith(undefined);
+    const cost = ex.testCalculateCost(
+      { input_tokens: 0, cache_creation_input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 },
+      0
+    );
+    expect(cost).toBeCloseTo(0, 6);
   });
 });
