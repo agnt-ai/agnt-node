@@ -136,7 +136,9 @@ export default class BedrockExecutor extends BaseExecutor {
         continue;
       }
 
-      // Handle tool messages
+      // Handle tool messages — Bedrock requires ALL tool results from a parallel
+      // tool call batch to be in a single user message as multiple toolResult
+      // content blocks. Merge consecutive tool messages into one.
       if (msg.role === 'tool') {
         let toolResultContent: any;
         if (typeof msg.content === 'string') {
@@ -153,17 +155,19 @@ export default class BedrockExecutor extends BaseExecutor {
         } else {
           toolResultContent = { text: String(msg.content ?? '') };
         }
-        formatted.push({
-          role: 'user',
-          content: [
-            {
-              toolResult: {
-                toolUseId: msg.tool_call_id,
-                content: [toolResultContent]
-              }
-            }
-          ]
-        });
+        const toolResultBlock = {
+          toolResult: {
+            toolUseId: msg.tool_call_id,
+            content: [toolResultContent]
+          }
+        };
+        // If the last formatted message is already a tool-result batch, append to it.
+        const last = formatted[formatted.length - 1];
+        if (last && last.role === 'user' && Array.isArray(last.content) && last.content[0]?.toolResult) {
+          last.content.push(toolResultBlock);
+        } else {
+          formatted.push({ role: 'user', content: [toolResultBlock] });
+        }
         continue;
       }
 
