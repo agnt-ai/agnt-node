@@ -461,8 +461,20 @@ export default class BaseExecutor {
   }
 
   // Calculate cost in USD using per-model rates from the pricing catalog.
-  // When a raw usage object is passed, applies the correct rate for each
-  // token type (regular, cache creation, cache read).
+  //
+  // Provider-agnostic, model-driven: cost is data, not branching. The four-term
+  // formula is identical for every provider and model. Cache rates come straight
+  // from the catalog; a null/undefined cache rate contributes 0 — that is how
+  // "this provider doesn't charge for cache creation" is expressed (e.g. OpenAI
+  // and Google have no cache-creation rate). Never special-case a provider here.
+  //
+  //   cost = input        /1e6 * inputTokensPer1M
+  //        + output       /1e6 * outputTokensPer1M
+  //        + cacheRead    /1e6 * (cacheReadTokensPer1M     ?? 0)
+  //        + cacheCreation/1e6 * (cacheCreationTokensPer1M ?? 0)
+  //
+  // Accepts either a raw provider usage object (disjoint buckets) or, for the
+  // simple no-cache call sites, plain input/output token counts.
   protected calculateCost(
     inputTokensOrUsage: number | { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number },
     outputTokens: number
@@ -470,9 +482,10 @@ export default class BaseExecutor {
     const p = this.modelPricing;
     const inRate      = p?.inputTokensPer1M          ?? 3;
     const outRate     = p?.outputTokensPer1M         ?? 15;
-    // Fall back to Anthropic standard multipliers if catalog rates not seeded yet
-    const createRate  = p?.cacheCreationTokensPer1M  ?? inRate * 1.25;
-    const readRate    = p?.cacheReadTokensPer1M      ?? inRate * 0.10;
+    // A null/undefined cache rate means this provider/model doesn't bill that
+    // bucket — it contributes 0. No provider-specific multiplier fallback.
+    const createRate  = p?.cacheCreationTokensPer1M  ?? 0;
+    const readRate    = p?.cacheReadTokensPer1M      ?? 0;
 
     let costUSD = (outputTokens / 1_000_000) * outRate;
 

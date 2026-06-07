@@ -75,6 +75,15 @@ export default class OpenAIExecutor extends BaseExecutor {
     const usageTyped = response.usage as typeof response.usage & {
       prompt_tokens_details?: { cached_tokens?: number };
     };
+    // OpenAI's prompt_tokens INCLUDES the cached tokens (cached_tokens is a
+    // subset of prompt_tokens), unlike Anthropic where input_tokens excludes
+    // cache. Subtract the cached tokens out so input_tokens is the UNCACHED
+    // count, making the four usage buckets disjoint across all providers. The
+    // pipeline relies on this: the inclusive total is recovered by summation
+    // (input + cache_read + cache_creation), and cost is the sum of disjoint
+    // buckets — so cache reads must not also live inside input_tokens or they
+    // get charged twice.
+    const cachedTokens = usageTyped?.prompt_tokens_details?.cached_tokens ?? 0;
     return {
       message: {
         role: message.role,
@@ -82,9 +91,9 @@ export default class OpenAIExecutor extends BaseExecutor {
         tool_calls: this.#extractToolCalls(message.tool_calls)
       },
       usage: {
-        input_tokens: response.usage!.prompt_tokens,
+        input_tokens: Math.max(0, response.usage!.prompt_tokens - cachedTokens),
         output_tokens: response.usage!.completion_tokens,
-        cache_read_input_tokens: usageTyped?.prompt_tokens_details?.cached_tokens ?? 0,
+        cache_read_input_tokens: cachedTokens,
         cache_creation_input_tokens: 0
       }
     };
