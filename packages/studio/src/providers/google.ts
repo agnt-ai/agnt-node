@@ -122,12 +122,14 @@ export default class GoogleExecutor extends BaseExecutor {
       cache_creation_input_tokens: 0
     };
 
-    // Format response to match expected structure
+    // rawParts preserves thought parts (incl. thoughtSignature) so they can be
+    // echoed back verbatim in subsequent turns — required by Gemini thinking models.
     return {
       message: {
         role: 'assistant',
         content: textContent,
-        tool_calls: toolCalls
+        tool_calls: toolCalls,
+        rawParts: candidate.content.parts ?? []
       },
       usage
     };
@@ -179,16 +181,22 @@ export default class GoogleExecutor extends BaseExecutor {
 
       // Handle assistant messages with tool_calls
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        // Echo raw parts verbatim when available — preserves thought parts with
+        // thoughtSignature required by Gemini thinking models on subsequent turns.
+        if (msg.rawParts && msg.rawParts.length > 0) {
+          contents.push({ role: 'model', parts: msg.rawParts });
+          continue;
+        }
+
+        // Fallback: reconstruct from tool_calls (non-thinking models)
         const parts: Part[] = [];
 
-        // Add text content if present
         if (msg.content) {
           parts.push({
             text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
           });
         }
 
-        // Add function calls
         for (const toolCall of msg.tool_calls) {
           parts.push({
             functionCall: {
@@ -198,10 +206,7 @@ export default class GoogleExecutor extends BaseExecutor {
           });
         }
 
-        contents.push({
-          role: 'model',
-          parts
-        });
+        contents.push({ role: 'model', parts });
         continue;
       }
 
