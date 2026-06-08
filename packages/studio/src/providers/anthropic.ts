@@ -278,7 +278,14 @@ export default class AnthropicExecutor extends BaseExecutor {
   #formatToolChoice(toolChoice: any): any {
     if (typeof toolChoice === 'string') {
       if (toolChoice === 'required' || toolChoice === 'any') {
-        return { type: 'any', disable_parallel_tool_use: true };
+        // Allow parallel tool calls — the model can emit several tool_use
+        // blocks in one turn (handleToolCalls already iterates and runs them
+        // all). `type: 'any'` still forces at least one tool call (progress),
+        // so we keep the forced-progress guarantee AND get parallelism.
+        // Previously this hardcoded `disable_parallel_tool_use: true`, which
+        // was stricter than Anthropic's own default (parallel allowed) for no
+        // reason and serialized every agent run one tool per turn.
+        return { type: 'any' };
       }
       return { type: 'auto' };
     }
