@@ -164,17 +164,13 @@ export default class GoogleExecutor extends BaseExecutor {
         // For Google, tool_call_id IS the function name (we set id = name in extractToolCalls)
         const toolName = msg.tool_call_id || msg.name || 'unknown';
 
-        // Tool results go into a 'function' part with a 'functionResponse'
+        // Gemini requires functionResponse.response to be an object, not an array.
+        const parsed = JSON.parse(msg.content as string);
+        const response = Array.isArray(parsed) ? { result: parsed } : (parsed ?? {});
+
         contents.push({
           role: 'function',
-          parts: [
-            {
-              functionResponse: {
-                name: toolName,
-                response: JSON.parse(msg.content as string)
-              }
-            }
-          ]
+          parts: [{ functionResponse: { name: toolName, response } }]
         });
         continue;
       }
