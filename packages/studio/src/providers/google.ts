@@ -63,7 +63,9 @@ export default class GoogleExecutor extends BaseExecutor {
       // Handle tool_choice
       if (options.tool_choice === 'required') {
         // Gemini doesn't have a direct equivalent to "required"
-        // We'll use function calling mode ANY
+        // We'll use function calling mode ANY — which forces a function call
+        // and allows parallel calls (Gemini parallelizes by default; no
+        // disable flag).
         modelConfig.toolConfig = {
           functionCallingConfig: {
             mode: 'ANY'

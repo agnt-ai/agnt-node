@@ -298,6 +298,8 @@ export default class BedrockExecutor extends BaseExecutor {
    */
   #formatToolChoice(toolChoice: any): any {
     if (typeof toolChoice === 'string') {
+      // `{ any: {} }` forces a tool call and allows parallel tool use — the
+      // Converse API has no disable-parallel flag, so parallel is the default.
       if (toolChoice === 'required' || toolChoice === 'any') {
         return { any: {} };
       }

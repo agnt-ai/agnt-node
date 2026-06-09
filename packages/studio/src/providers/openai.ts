@@ -51,6 +51,10 @@ export default class OpenAIExecutor extends BaseExecutor {
     // Add tools if provided
     if (options.tools && options.tools.length > 0) {
       params.tools = options.tools.map(t => this.#formatTool(t));
+      // Allow parallel tool calls — the model can emit several tool calls in a
+      // single turn. This is OpenAI's default; set explicitly so it can't
+      // silently regress and to match parallel behavior across providers.
+      params.parallel_tool_calls = true;
     }
 
     // Add tool_choice if specified

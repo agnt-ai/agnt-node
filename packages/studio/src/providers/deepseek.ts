@@ -172,7 +172,8 @@ export default class DeepSeekExecutor extends BaseExecutor {
    */
   #formatToolChoice(toolChoice: any): any {
     if (typeof toolChoice === 'string') {
-      // "required" or "any" -> "required"
+      // "required" or "any" -> "required". Parallel tool calls stay enabled
+      // (OpenAI-compatible default — nothing here disables them).
       if (toolChoice === 'required' || toolChoice === 'any') {
         return 'required';
       }
