@@ -7,6 +7,7 @@
 import { GoogleGenerativeAI, Content, Part, FunctionDeclaration, Tool } from '@google/generative-ai';
 import BaseExecutor from '../BaseExecutor.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
+import { fileToGeminiPart } from './fileAttachment.js';
 
 export default class GoogleExecutor extends BaseExecutor {
   private client: GoogleGenerativeAI;
@@ -256,6 +257,10 @@ export default class GoogleExecutor extends BaseExecutor {
             });
           }
         }
+      } else if (item.type === 'file') {
+        // Cross-provider file block (e.g. PDF) → Gemini inline data.
+        const part = fileToGeminiPart(item);
+        if (part) parts.push(part);
       }
     }
 
