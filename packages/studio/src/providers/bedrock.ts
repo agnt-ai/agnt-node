@@ -7,6 +7,7 @@
 import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 import BaseExecutor from '../BaseExecutor.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
+import { fileToBedrockDocument } from './fileAttachment.js';
 
 export default class BedrockExecutor extends BaseExecutor {
   private client: BedrockRuntimeClient;
@@ -229,6 +230,13 @@ export default class BedrockExecutor extends BaseExecutor {
           // Bedrock expects images in a specific format
           // This should be handled by ImageCache before getting here
           this.log('[BedrockExecutor] Warning: Image processing not yet implemented');
+          return null;
+        }
+        if (item.type === 'file') {
+          // Cross-provider file block (e.g. PDF) → Bedrock Converse document.
+          const doc = fileToBedrockDocument(item);
+          if (doc) return doc;
+          this.log('[BedrockExecutor] Warning: unsupported/invalid file block — dropping');
           return null;
         }
         return item;

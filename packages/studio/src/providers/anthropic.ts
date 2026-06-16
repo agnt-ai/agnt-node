@@ -7,6 +7,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import BaseExecutor from '../BaseExecutor.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
+import { fileToAnthropicDocument } from './fileAttachment.js';
 
 export default class AnthropicExecutor extends BaseExecutor {
   private client: Anthropic;
@@ -217,6 +218,13 @@ export default class AnthropicExecutor extends BaseExecutor {
           // If it's a URL, Anthropic expects it to be converted to base64
           // This should be handled by ImageCache before getting here
           this.log('[AnthropicExecutor] Warning: Image URL should be converted to base64 before invoking');
+          return null;
+        }
+        if (item.type === 'file') {
+          // Cross-provider file block (e.g. PDF) → Anthropic document block.
+          const doc = fileToAnthropicDocument(item);
+          if (doc) return doc;
+          this.log('[AnthropicExecutor] Warning: file block missing base64 data URL — dropping');
           return null;
         }
 
