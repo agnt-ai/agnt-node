@@ -47,6 +47,7 @@ export async function createExecutor(config: BaseExecutorConfig): Promise<BaseEx
       return new DeepSeekExecutor(configWithFactory);
 
     case 'google':
+    case 'gemini':
       log(`[executorFactory] Creating Google executor: ${primaryModel.model}`);
       return new GoogleExecutor(configWithFactory);
 
