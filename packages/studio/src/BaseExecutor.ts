@@ -703,6 +703,69 @@ export default class BaseExecutor {
     throw new Error('[BaseExecutor] Agent ended without calling terminating tool');
   }
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Argument normalization (direct-call boundary)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Schema-aware coercion of stringified array/object arguments.
+   *
+   * When the LLM emits a tool call directly, it frequently encodes array/object
+   * arguments as JSON *strings* (e.g. `to: "[\"a@b.com\"]"`, `updates: "{...}"`).
+   * This is the single normalization point at the direct-call boundary: for every
+   * top-level parameter whose schema declares `type: "array"` or `type: "object"`,
+   * if the incoming value is a string, we attempt `JSON.parse`. The parsed value is
+   * used ONLY when it actually matches the declared type; otherwise the original
+   * string is left untouched so normal downstream validation produces a clean error.
+   *
+   * Safeguards against over-parsing:
+   *  - A parameter typed `string` (or any non array/object type) is NEVER parsed,
+   *    even if its value looks like JSON. We only coerce when the schema expects
+   *    array/object.
+   *  - JSON.parse failures and type mismatches leave the original value untouched.
+   *  - Number coercion is intentionally out of scope (the reference `execute_tool`
+   *    path does not coerce numeric strings at this boundary).
+   *
+   * Every tool call — system, custom, dispatch, and `execute_tool` itself — flows
+   * through `handleToolCalls`, so this single point brings direct calls to parity
+   * with what the meta-tool path already does.
+   */
+  protected normalizeToolArgs(name: string, args: Record<string, any>): Record<string, any> {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+
+    const def = this.allToolDefs.find(d => d.function?.name === name);
+    const properties = def?.function?.parameters?.properties;
+    if (!properties || typeof properties !== 'object') return args;
+
+    let out: Record<string, any> | null = null; // copy-on-write — only allocated if we actually coerce
+
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value !== 'string') continue;
+
+      const declaredType = (properties as Record<string, any>)[key]?.type;
+      const expectsArray  = declaredType === 'array'  || (Array.isArray(declaredType) && declaredType.includes('array'));
+      const expectsObject = declaredType === 'object' || (Array.isArray(declaredType) && declaredType.includes('object'));
+      if (!expectsArray && !expectsObject) continue; // never parse a string-typed (or untyped) param
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        continue; // not valid JSON — leave it for normal validation
+      }
+
+      const parsedIsArray  = Array.isArray(parsed);
+      const parsedIsObject = parsed !== null && typeof parsed === 'object' && !parsedIsArray;
+      // Only accept the parse if it produced the type the schema expects.
+      if ((expectsArray && parsedIsArray) || (expectsObject && parsedIsObject)) {
+        if (!out) out = { ...args }; // never mutate the caller's args object in place
+        out[key] = parsed;
+      }
+    }
+
+    return out ?? args;
+  }
+
   protected async handleToolCalls(toolCalls: ToolCall[]): Promise<ToolResult[]> {
     const results: ToolResult[] = [];
 
@@ -726,6 +789,11 @@ export default class BaseExecutor {
           tc.args = hookResult.args;
         }
       }
+
+      // Single normalization point at the direct-call boundary: coerce
+      // stringified array/object args to their schema-declared types so direct
+      // tool calls behave identically to the execute_tool meta-tool path.
+      tc.args = this.normalizeToolArgs(tc.name, tc.args);
 
       if (tc.name === 'finish_agent_run') {
         const handler = this.toolRouter[tc.name];
