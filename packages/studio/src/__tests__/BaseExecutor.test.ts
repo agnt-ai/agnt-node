@@ -67,6 +67,14 @@ class TestExecutor extends BaseExecutor {
 
   getLog() { return this.log; }
   getDebug() { return this.debug; }
+
+  testNormalizeToolArgs(name: string, args: Record<string, any>) {
+    return this.normalizeToolArgs(name, args);
+  }
+
+  testHandleToolCalls(toolCalls: any[]) {
+    return this.handleToolCalls(toolCalls);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -308,5 +316,115 @@ describe('calculateCost — cache-aware, provider-agnostic', () => {
       0
     );
     expect(cost).toBeCloseTo(0, 6);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// normalizeToolArgs — schema-aware stringified arg coercion (direct-call boundary)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('normalizeToolArgs — schema-aware arg coercion', () => {
+  // Manifest with a tool whose schema declares array/object/string/number params.
+  function toolManifest() {
+    return makeManifest({
+      spec: {
+        routingStrategy: 'fallback',
+        enableToolCalls: true,
+        variables: [],
+        files: [],
+        models: [{ provider: 'anthropic', model: 'claude-sonnet-4-5' }],
+        dependencies: [],
+        tools: [
+          {
+            name: 'contact_lookup',
+            description: 'lookup',
+            parameters: {
+              type: 'object',
+              properties: {
+                emails:  { type: 'array',  items: { type: 'string' } },
+                updates: { type: 'object' },
+                query:   { type: 'string' },
+                limit:   { type: 'number' },
+                dispatchIndex: { type: ['array', 'null'] },
+              },
+            },
+          },
+        ],
+      },
+    } as any);
+  }
+
+  function ex() {
+    return new TestExecutor(makeConfig(toolManifest()));
+  }
+
+  it('coerces a stringified array arg to a real array', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { emails: '["a@b.com","c@d.com"]' });
+    expect(out.emails).toEqual(['a@b.com', 'c@d.com']);
+  });
+
+  it('coerces a stringified object arg to a real object', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { updates: '{"name":"Bob"}' });
+    expect(out.updates).toEqual({ name: 'Bob' });
+  });
+
+  it('leaves a legitimate string-typed param untouched even if it looks like JSON', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { query: '[1,2,3]' });
+    expect(out.query).toBe('[1,2,3]');
+    expect(typeof out.query).toBe('string');
+  });
+
+  it('leaves a non-JSON string for an array param untouched (clean validation downstream)', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { emails: 'not json at all' });
+    expect(out.emails).toBe('not json at all');
+  });
+
+  it('passes through an already-correct array unchanged', () => {
+    const input = { emails: ['a@b.com'] };
+    const out = ex().testNormalizeToolArgs('contact_lookup', input);
+    expect(out.emails).toEqual(['a@b.com']);
+  });
+
+  it('does NOT coerce a numeric string (number coercion is out of scope)', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { limit: '5' });
+    expect(out.limit).toBe('5');
+    expect(typeof out.limit).toBe('string');
+  });
+
+  it('does NOT accept a parsed object when the schema expects an array (type mismatch)', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { emails: '{"x":1}' });
+    expect(out.emails).toBe('{"x":1}'); // parse succeeded but type wrong → untouched
+  });
+
+  it('honors a union type that includes array', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { dispatchIndex: '[0,1]' });
+    expect(out.dispatchIndex).toEqual([0, 1]);
+  });
+
+  it('does not mutate the caller args object in place', () => {
+    const input: Record<string, any> = { emails: '["a@b.com"]' };
+    const out = ex().testNormalizeToolArgs('contact_lookup', input);
+    expect(input.emails).toBe('["a@b.com"]'); // original untouched
+    expect(out.emails).toEqual(['a@b.com']);
+  });
+
+  it('leaves args untouched for an unknown tool with no schema', () => {
+    const input = { emails: '["a@b.com"]' };
+    const out = ex().testNormalizeToolArgs('no_such_tool', input);
+    expect(out.emails).toBe('["a@b.com"]');
+  });
+
+  it('normalizes through handleToolCalls before dispatch to the handler', async () => {
+    let received: any;
+    const router = {
+      contact_lookup: { execute: async (args: any) => { received = args; return { completed: true }; } },
+    };
+    const executor = new TestExecutor(makeConfig(toolManifest(), { toolRouter: router }));
+    await executor.testHandleToolCalls([
+      { id: 't1', name: 'contact_lookup', args: { emails: '["a@b.com"]', updates: '{"k":1}', query: '[9]' } },
+    ]);
+    expect(received.emails).toEqual(['a@b.com']);   // string→array
+    expect(received.updates).toEqual({ k: 1 });     // string→object
+    expect(received.query).toBe('[9]');             // string param left alone
   });
 });
