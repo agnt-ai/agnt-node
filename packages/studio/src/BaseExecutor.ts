@@ -851,7 +851,7 @@ export default class BaseExecutor {
       } else {
         const handler = this.toolRouter[tc.name];
         if (!handler) {
-          toolResult = { completed: false, error: true, message: `Tool '${tc.name}' not found` };
+          toolResult = { completed: false, error: true, message: `Tool '${tc.name}' not found. Most tools are lazy-loaded — call fetch_tools() with no args to see all groups, or fetch_tools({name: "${tc.name}"}) to check spelling. Then call execute_tool({tool_name, params}) to run it.` };
         } else {
           try {
             toolResult = await handler.execute(tc.args);
