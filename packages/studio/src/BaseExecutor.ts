@@ -708,23 +708,36 @@ export default class BaseExecutor {
   // ───────────────────────────────────────────────────────────────────────────
 
   /**
-   * Schema-aware coercion of stringified array/object arguments.
+   * Schema-aware coercion of stringified tool arguments.
    *
-   * When the LLM emits a tool call directly, it frequently encodes array/object
-   * arguments as JSON *strings* (e.g. `to: "[\"a@b.com\"]"`, `updates: "{...}"`).
-   * This is the single normalization point at the direct-call boundary: for every
-   * top-level parameter whose schema declares `type: "array"` or `type: "object"`,
-   * if the incoming value is a string, we attempt `JSON.parse`. The parsed value is
-   * used ONLY when it actually matches the declared type; otherwise the original
-   * string is left untouched so normal downstream validation produces a clean error.
+   * When the LLM emits a tool call directly, it frequently encodes structured or
+   * primitive arguments as JSON *strings* — `to: "[\"a@b.com\"]"`, `payload: "{...}"`,
+   * `limit: "5"`, `dryRun: "true"`. Some downstream tools coerce defensively and some
+   * don't: the dispatch executor read `payload.meetingId` off a raw string and aborted
+   * the whole cart with a non-retryable error. This is the single normalization point
+   * at the direct-call boundary: for every top-level parameter, if the incoming value
+   * is a string and the schema declares a concrete type, we coerce to that type — but
+   * ONLY when the coercion is unambiguous and lossless. Anything uncertain is left
+   * untouched so normal downstream validation produces a clean error.
    *
-   * Safeguards against over-parsing:
-   *  - A parameter typed `string` (or any non array/object type) is NEVER parsed,
-   *    even if its value looks like JSON. We only coerce when the schema expects
-   *    array/object.
-   *  - JSON.parse failures and type mismatches leave the original value untouched.
-   *  - Number coercion is intentionally out of scope (the reference `execute_tool`
-   *    path does not coerce numeric strings at this boundary).
+   * Coercion policy (top-level params only):
+   *  - `array` / `object`   → `JSON.parse`, accepted only if the parse yields that type.
+   *  - `number` / `integer` → accepted only if the trimmed string round-trips exactly
+   *    (`String(Number(s)) === s`). This rejects big-int precision loss (a 19-digit id
+   *    typed as number stays a string), leading zeros, exponent/hex forms, `""`, and
+   *    `NaN`/`Infinity`. `integer` additionally requires an integer value.
+   *  - `boolean`            → accepted only for the exact literals `"true"` / `"false"`.
+   *
+   * Deliberate non-goals — each of these has a real downside, so we do NOT do them:
+   *  - A param whose schema ALLOWS `string` is never coerced: the raw string is already
+   *    schema-valid, so changing it could alter caller intent (union `["string","number"]`).
+   *  - No recursion into nested values — a stringified element inside an array/object is
+   *    left alone, because recursing risks corrupting legitimate string content.
+   *  - No `null`/loose-boolean (`"yes"`, `"1"`) coercion — too ambiguous to be safe.
+   *  - Parse failures, type mismatches, and lossy conversions leave the value as-is.
+   *
+   * Union types (`type: ["number","null"]`) are honored if they include the target.
+   * Copy-on-write: the caller's args object is never mutated in place.
    *
    * Every tool call — system, custom, dispatch, and `execute_tool` itself — flows
    * through `handleToolCalls`, so this single point brings direct calls to parity
@@ -738,29 +751,58 @@ export default class BaseExecutor {
     if (!properties || typeof properties !== 'object') return args;
 
     let out: Record<string, any> | null = null; // copy-on-write — only allocated if we actually coerce
+    const coerce = (key: string, parsed: any) => {
+      if (!out) out = { ...args }; // never mutate the caller's args object in place
+      out[key] = parsed;
+    };
 
     for (const [key, value] of Object.entries(args)) {
       if (typeof value !== 'string') continue;
 
       const declaredType = (properties as Record<string, any>)[key]?.type;
-      const expectsArray  = declaredType === 'array'  || (Array.isArray(declaredType) && declaredType.includes('array'));
-      const expectsObject = declaredType === 'object' || (Array.isArray(declaredType) && declaredType.includes('object'));
-      if (!expectsArray && !expectsObject) continue; // never parse a string-typed (or untyped) param
+      const types = Array.isArray(declaredType) ? declaredType : [declaredType];
 
-      let parsed: any;
-      try {
-        parsed = JSON.parse(value);
-      } catch {
-        continue; // not valid JSON — leave it for normal validation
+      // A param that legitimately accepts a string is already valid as-is — never
+      // coerce it, even if the value looks like JSON / a number / a boolean.
+      if (types.includes('string')) continue;
+
+      // ── array / object: JSON.parse, accept only on an exact type match ──
+      if (types.includes('array') || types.includes('object')) {
+        let parsed: any;
+        try {
+          parsed = JSON.parse(value);
+        } catch {
+          continue; // not valid JSON — leave it for normal validation
+        }
+        const parsedIsArray  = Array.isArray(parsed);
+        const parsedIsObject = parsed !== null && typeof parsed === 'object' && !parsedIsArray;
+        if ((types.includes('array') && parsedIsArray) || (types.includes('object') && parsedIsObject)) {
+          coerce(key, parsed);
+        }
+        continue;
       }
 
-      const parsedIsArray  = Array.isArray(parsed);
-      const parsedIsObject = parsed !== null && typeof parsed === 'object' && !parsedIsArray;
-      // Only accept the parse if it produced the type the schema expects.
-      if ((expectsArray && parsedIsArray) || (expectsObject && parsedIsObject)) {
-        if (!out) out = { ...args }; // never mutate the caller's args object in place
-        out[key] = parsed;
+      // ── number / integer: accept only on an exact, lossless round-trip ──
+      if (types.includes('number') || types.includes('integer')) {
+        const trimmed = value.trim();
+        if (trimmed === '') continue;
+        const n = Number(trimmed);
+        if (!Number.isFinite(n)) continue;     // NaN / Infinity → leave it
+        if (String(n) !== trimmed) continue;   // big-int loss / "01" / "1e3" / "1.0" → leave it
+        if (types.includes('integer') && !Number.isInteger(n)) continue;
+        coerce(key, n);
+        continue;
       }
+
+      // ── boolean: exact literals only ──
+      if (types.includes('boolean')) {
+        const tb = value.trim();
+        if (tb === 'true') coerce(key, true);
+        else if (tb === 'false') coerce(key, false);
+        continue;
+      }
+
+      // any other / untyped param → never touched
     }
 
     return out ?? args;

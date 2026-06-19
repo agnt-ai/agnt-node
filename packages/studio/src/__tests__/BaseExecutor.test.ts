@@ -345,6 +345,11 @@ describe('normalizeToolArgs — schema-aware arg coercion', () => {
                 updates: { type: 'object' },
                 query:   { type: 'string' },
                 limit:   { type: 'number' },
+                count:   { type: 'integer' },
+                ratio:   { type: 'number' },
+                enabled: { type: 'boolean' },
+                flexId:  { type: ['string', 'number'] },
+                priority: { type: ['integer', 'null'] },
                 dispatchIndex: { type: ['array', 'null'] },
               },
             },
@@ -385,10 +390,67 @@ describe('normalizeToolArgs — schema-aware arg coercion', () => {
     expect(out.emails).toEqual(['a@b.com']);
   });
 
-  it('does NOT coerce a numeric string (number coercion is out of scope)', () => {
+  it('coerces a numeric string to a number', () => {
     const out = ex().testNormalizeToolArgs('contact_lookup', { limit: '5' });
-    expect(out.limit).toBe('5');
-    expect(typeof out.limit).toBe('string');
+    expect(out.limit).toBe(5);
+    expect(typeof out.limit).toBe('number');
+  });
+
+  it('coerces a decimal string for a number param', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { ratio: '3.14' });
+    expect(out.ratio).toBe(3.14);
+  });
+
+  it('coerces a negative numeric string', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { ratio: '-2.5' });
+    expect(out.ratio).toBe(-2.5);
+  });
+
+  it('coerces an integer string for an integer param', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { count: '42' });
+    expect(out.count).toBe(42);
+  });
+
+  it('does NOT coerce a decimal for an integer param (left for validation)', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { count: '3.5' });
+    expect(out.count).toBe('3.5');
+  });
+
+  it('does NOT coerce a big-integer string that would lose precision', () => {
+    const big = '12345678901234567890'; // > Number.MAX_SAFE_INTEGER — must stay a string
+    const out = ex().testNormalizeToolArgs('contact_lookup', { count: big });
+    expect(out.count).toBe(big);
+    expect(typeof out.count).toBe('string');
+  });
+
+  it('does NOT coerce numeric strings with leading zeros, exponents, or whitespace-only', () => {
+    expect(ex().testNormalizeToolArgs('contact_lookup', { count: '007' }).count).toBe('007');
+    expect(ex().testNormalizeToolArgs('contact_lookup', { ratio: '1e3' }).ratio).toBe('1e3');
+    expect(ex().testNormalizeToolArgs('contact_lookup', { ratio: '' }).ratio).toBe('');
+    expect(ex().testNormalizeToolArgs('contact_lookup', { ratio: 'NaN' }).ratio).toBe('NaN');
+  });
+
+  it('coerces an integer string through a union that includes integer', () => {
+    const out = ex().testNormalizeToolArgs('contact_lookup', { priority: '2' });
+    expect(out.priority).toBe(2);
+  });
+
+  it('coerces the boolean literals "true" and "false"', () => {
+    expect(ex().testNormalizeToolArgs('contact_lookup', { enabled: 'true' }).enabled).toBe(true);
+    expect(ex().testNormalizeToolArgs('contact_lookup', { enabled: 'false' }).enabled).toBe(false);
+  });
+
+  it('does NOT coerce loose booleans ("yes", "1", "True")', () => {
+    expect(ex().testNormalizeToolArgs('contact_lookup', { enabled: 'yes' }).enabled).toBe('yes');
+    expect(ex().testNormalizeToolArgs('contact_lookup', { enabled: '1' }).enabled).toBe('1');
+    expect(ex().testNormalizeToolArgs('contact_lookup', { enabled: 'True' }).enabled).toBe('True');
+  });
+
+  it('never coerces a param whose schema also allows string (union with string)', () => {
+    // flexId accepts ["string","number"] — the raw string is already valid, leave it.
+    const out = ex().testNormalizeToolArgs('contact_lookup', { flexId: '42' });
+    expect(out.flexId).toBe('42');
+    expect(typeof out.flexId).toBe('string');
   });
 
   it('does NOT accept a parsed object when the schema expects an array (type mismatch)', () => {
