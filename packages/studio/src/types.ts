@@ -20,6 +20,13 @@ export interface Message {
   tool_call_id?: string;
   name?: string;
   rawParts?: any[];
+  /** RR `release_after_read` (RUNTIME_EFFICIENCY.md Phase 2): the agent
+   *  declared this tool result will be read once and dropped. Providers that
+   *  support manual cache breakpoints (Anthropic) keep it out of the cached
+   *  prefix so its first inclusion isn't written to cache; on other providers
+   *  it's inert metadata. Set by BaseExecutor from the originating call's
+   *  `release_after_read` arg. */
+  releaseAfterRead?: boolean;
 }
 
 export interface ToolCall {

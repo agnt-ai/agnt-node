@@ -57,13 +57,31 @@ export default class AnthropicExecutor extends BaseExecutor {
     // One-shot callers (QA, ignore/duplicate checks, etc.) pass disableCache: true
     // to skip this — they have no follow-up turn to benefit from the cache, so
     // the write surcharge (~25% on input tokens) is pure waste.
-    if (!options.disableCache) {
+    // RR release_after_read: a tool result the agent declared it will read once
+    // and drop. To avoid paying the cache-write surcharge on content that's
+    // about to leave context, we must keep it OUT of the cached prefix. The
+    // top-level cache_control can't express "cache up to here, not past it", so
+    // when such a message exists we switch THIS call to explicit block-level
+    // breakpoints: cache system + tools + the transcript prefix up to (but not
+    // including) the earliest read-once message. If the agent keeps the content
+    // (doesn't release it), a later turn no longer has it as the read-once
+    // boundary and it falls back into the cached prefix — the spec's recovery.
+    const readOnceIdx = messages.findIndex(m => (m as any).releaseAfterRead);
+    // Any read-once message → explicit path, so it stays out of the cached
+    // prefix. (When it's the first message there's simply no message-prefix
+    // breakpoint to place; system + tools still cache, the read-once doesn't.)
+    const useExplicitCache = !options.disableCache && readOnceIdx !== -1;
+
+    if (!options.disableCache && !useExplicitCache) {
+      // Common path — unchanged.
       params.cache_control = { type: 'ephemeral' };
     }
 
     // Add system parameter if we have system messages
     if (systemContent) {
-      params.system = systemContent;
+      params.system = useExplicitCache
+        ? [{ type: 'text', text: systemContent, cache_control: { type: 'ephemeral' } }]
+        : systemContent;
     }
 
     // Add tools if provided
@@ -71,6 +89,22 @@ export default class AnthropicExecutor extends BaseExecutor {
       params.tools = options.tools.map((t: any) => {
         return this.#formatTool(t);
       });
+      // Cache the tools block in the explicit path (stable across turns).
+      if (useExplicitCache && params.tools.length > 0) {
+        const last = params.tools[params.tools.length - 1];
+        params.tools[params.tools.length - 1] = { ...last, cache_control: { type: 'ephemeral' } };
+      }
+    }
+
+    // Place the message-prefix breakpoint just before the read-once tail.
+    if (useExplicitCache) {
+      // Map source index → formatted index: #formatMessages drops system
+      // messages and preserves order 1:1 for the rest.
+      const sysBefore = messages.slice(0, readOnceIdx).filter(m => m.role === 'system').length;
+      const bpIdx = (readOnceIdx - sysBefore) - 1;
+      if (bpIdx >= 0 && params.messages[bpIdx]) {
+        this.#attachCacheControl(params.messages[bpIdx]);
+      }
     }
 
     // Add tool_choice if specified
@@ -176,6 +210,21 @@ export default class AnthropicExecutor extends BaseExecutor {
     }
 
     return formatted;
+  }
+
+  /**
+   * Attach an ephemeral cache breakpoint to a formatted message's last content
+   * block (converting string content to a text block if needed). Used for the
+   * RR release_after_read message-prefix breakpoint.
+   */
+  #attachCacheControl(msg: any): void {
+    if (!msg) return;
+    if (typeof msg.content === 'string') {
+      msg.content = [{ type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }];
+    } else if (Array.isArray(msg.content) && msg.content.length > 0) {
+      const i = msg.content.length - 1;
+      msg.content[i] = { ...msg.content[i], cache_control: { type: 'ephemeral' } };
+    }
   }
 
   /**
