@@ -27,6 +27,15 @@ export default class AnthropicExecutor extends BaseExecutor {
     // Initialize Anthropic client
     this.client = new Anthropic({
       apiKey: anthropicCreds.apiKey,
+      // Absorb transient overload (529), rate-limit (429), and 5xx/timeout
+      // spikes at the SDK layer with exponential backoff before they ever reach
+      // the executor's model-fallback path. The SDK default is 2, which a brief
+      // capacity blip can exhaust — surfacing as a hard error mid-run.
+      // timeout: 30 s per attempt — SDK default is 600 s, which with maxRetries:5
+      // would allow up to 50 min per model on a hung request (past Lambda's 300 s
+      // limit). 5 × 30 s = 150 s worst case, leaving room for the tool loop.
+      maxRetries: 5,
+      timeout: 30_000,
       dangerouslyAllowBrowser: anthropicCreds.dangerouslyAllowBrowser
     });
 
