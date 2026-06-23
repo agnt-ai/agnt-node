@@ -649,7 +649,16 @@ export default class BaseExecutor {
       this.forceNextTool = toolResults.find(r => r.forceNextTool)?.forceNextTool;
 
       for (const r of toolResults) {
-        this.messages.push({ role: 'tool', tool_call_id: r.tool_call_id, content: JSON.stringify(r.content) });
+        // RR release_after_read: if the originating call asked for it, tag the
+        // result message so the provider keeps it out of the cached prefix
+        // (Anthropic) — see Message.releaseAfterRead.
+        const call = taggedToolCalls.find(tc => tc.id === r.tool_call_id);
+        const releaseAfterRead = call?.args?.release_after_read === true;
+        const msg: Message = {
+          role: 'tool', tool_call_id: r.tool_call_id, content: JSON.stringify(r.content),
+          ...(releaseAfterRead ? { releaseAfterRead: true } : {}),
+        };
+        this.messages.push(msg);
       }
 
       if (this.onToolCall) {
