@@ -505,11 +505,15 @@ describe('isRetryableError — transient faults retry, client errors do not', ()
     }
   });
 
-  it('retries 429 (rate limit), 408 (timeout), and 425 (too early)', () => {
+  it('retries 429 (rate limit) and 408 (timeout)', () => {
     const e = ex();
-    for (const status of [429, 408, 425]) {
+    for (const status of [429, 408]) {
       expect(e.isRetryableError({ status }), `status ${status}`).toBe(true);
     }
+  });
+
+  it('does NOT retry 501 Not Implemented (permanent — wrong endpoint/feature)', () => {
+    expect(ex().isRetryableError({ status: 501 })).toBe(false);
   });
 
   it('does NOT retry 4xx client errors (auth/validation/not-found)', () => {
