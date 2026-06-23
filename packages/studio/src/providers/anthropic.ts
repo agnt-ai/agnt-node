@@ -27,6 +27,11 @@ export default class AnthropicExecutor extends BaseExecutor {
     // Initialize Anthropic client
     this.client = new Anthropic({
       apiKey: anthropicCreds.apiKey,
+      // Absorb transient overload (529), rate-limit (429), and 5xx/timeout
+      // spikes at the SDK layer with exponential backoff before they ever reach
+      // the executor's model-fallback path. The SDK default is 2, which a brief
+      // capacity blip can exhaust — surfacing as a hard error mid-run.
+      maxRetries: 5,
       dangerouslyAllowBrowser: anthropicCreds.dangerouslyAllowBrowser
     });
 

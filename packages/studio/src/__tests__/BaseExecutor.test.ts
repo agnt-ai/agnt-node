@@ -490,3 +490,50 @@ describe('normalizeToolArgs — schema-aware arg coercion', () => {
     expect(received.query).toBe('[9]');             // string param left alone
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// isRetryableError — transient-fault classification for model fallback
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('isRetryableError — transient faults retry, client errors do not', () => {
+  const ex = () => new TestExecutor(makeConfig(makeManifest())) as any;
+
+  it('retries any 5xx, including gateway/CDN codes not explicitly enumerated', () => {
+    const e = ex();
+    for (const status of [500, 502, 503, 504, 520, 522, 524, 529]) {
+      expect(e.isRetryableError({ status }), `status ${status}`).toBe(true);
+    }
+  });
+
+  it('retries 429 (rate limit), 408 (timeout), and 425 (too early)', () => {
+    const e = ex();
+    for (const status of [429, 408, 425]) {
+      expect(e.isRetryableError({ status }), `status ${status}`).toBe(true);
+    }
+  });
+
+  it('does NOT retry 4xx client errors (auth/validation/not-found)', () => {
+    const e = ex();
+    for (const status of [400, 401, 403, 404, 422]) {
+      expect(e.isRetryableError({ status }), `status ${status}`).toBe(false);
+    }
+  });
+
+  it('retries Anthropic SDK typed errors by constructor name', () => {
+    const e = ex();
+    class OverloadedError extends Error {}
+    class RateLimitError extends Error {}
+    expect(e.isRetryableError(new OverloadedError('overloaded'))).toBe(true);
+    expect(e.isRetryableError(new RateLimitError('429'))).toBe(true);
+  });
+
+  it('retries Node network error codes', () => {
+    const e = ex();
+    expect(e.isRetryableError({ code: 'ECONNRESET' })).toBe(true);
+    expect(e.isRetryableError({ code: 'ETIMEDOUT' })).toBe(true);
+  });
+
+  it('does not retry a plain unknown error', () => {
+    expect(ex().isRetryableError(new Error('something specific went wrong'))).toBe(false);
+  });
+});

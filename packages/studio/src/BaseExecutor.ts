@@ -339,10 +339,17 @@ export default class BaseExecutor {
 
   private isRetryableError(error: any): boolean {
     // HTTP status codes from Anthropic, OpenAI, Google, etc.
-    if (error?.status === 500) return true; // Internal server error
-    if (error?.status === 529) return true; // Anthropic overloaded
-    if (error?.status === 503) return true; // Service unavailable
-    if (error?.status === 429) return true; // Rate limited — fall back rather than wait
+    const status = typeof error?.status === 'number' ? error.status : undefined;
+    if (status !== undefined) {
+      // Any 5xx is a transient server-side fault — 500 internal, 502 bad gateway,
+      // 503 unavailable, 504 gateway timeout, 529 Anthropic overloaded, and the
+      // 520–524 family some CDNs/proxies emit. Catch the whole range rather than
+      // enumerating, so a gateway/proxy code we didn't list still falls back.
+      if (status >= 500) return true;
+      if (status === 429) return true; // Rate limited — fall back rather than wait
+      if (status === 408) return true; // Request timeout
+      if (status === 425) return true; // Too early (retry-safe)
+    }
     // Anthropic SDK typed errors
     const retryableNames = [
       'InternalServerError', 'OverloadedError', 'RateLimitError',

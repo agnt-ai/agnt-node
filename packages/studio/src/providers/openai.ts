@@ -26,6 +26,10 @@ export default class OpenAIExecutor extends BaseExecutor {
     // Initialize OpenAI client
     this.client = new OpenAI({
       apiKey: openaiCreds.apiKey,
+      // Absorb transient rate-limit (429) / 5xx / timeout spikes at the SDK
+      // layer with exponential backoff before the executor's model-fallback
+      // path. SDK default is 2; bump so a brief blip doesn't fail the run.
+      maxRetries: 5,
       dangerouslyAllowBrowser: openaiCreds.dangerouslyAllowBrowser
     });
 
