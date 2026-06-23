@@ -537,3 +537,54 @@ describe('isRetryableError — transient faults retry, client errors do not', ()
     expect(ex().isRetryableError(new Error('something specific went wrong'))).toBe(false);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// invokeWithFallback — a 529 composes through the model-fallback loop
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('invokeWithFallback — transient 529 behavior', () => {
+  it('falls back to the next model when the first throws a 529', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'primary',  fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'fallback', fallbackOrder: 1 },
+      ] },
+    });
+    const ex = new TestExecutor(makeConfig(manifest)) as any;
+    ex.invoke = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('Overloaded'), { status: 529 }))
+      .mockResolvedValueOnce({ message: { role: 'assistant', content: 'ok' }, usage: {} });
+
+    const result = await ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {});
+    expect(result.message.content).toBe('ok');
+    expect(ex.invoke).toHaveBeenCalledTimes(2);
+    expect(ex.model).toBe('fallback'); // advanced to the next model
+  });
+
+  it('single-model manifest: a 529 escaping the SDK rethrows (SDK maxRetries is the only retry)', async () => {
+    // Documents the contract: with one model, invokeWithFallback gives exactly
+    // one invoke() — the per-call retries live inside the provider SDK
+    // (maxRetries:5), not here. So a 529 that exhausts the SDK surfaces.
+    const ex = new TestExecutor(makeConfig(makeManifest())) as any; // 1 model
+    ex.invoke = vi.fn().mockRejectedValue(Object.assign(new Error('Overloaded'), { status: 529 }));
+
+    await expect(ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {}))
+      .rejects.toThrow('Overloaded');
+    expect(ex.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('a non-retryable 4xx rethrows immediately without trying the next model', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'primary',  fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'fallback', fallbackOrder: 1 },
+      ] },
+    });
+    const ex = new TestExecutor(makeConfig(manifest)) as any;
+    ex.invoke = vi.fn().mockRejectedValue(Object.assign(new Error('bad request'), { status: 400 }));
+
+    await expect(ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {}))
+      .rejects.toThrow('bad request');
+    expect(ex.invoke).toHaveBeenCalledTimes(1); // did NOT try the fallback model
+  });
+});
