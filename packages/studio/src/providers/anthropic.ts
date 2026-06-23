@@ -66,7 +66,17 @@ export default class AnthropicExecutor extends BaseExecutor {
     // including) the earliest read-once message. If the agent keeps the content
     // (doesn't release it), a later turn no longer has it as the read-once
     // boundary and it falls back into the cached prefix — the spec's recovery.
-    const readOnceIdx = messages.findIndex(m => (m as any).releaseAfterRead);
+    // Skip the scan entirely on one-shot callers (disableCache: true) — they
+    // can never reach useExplicitCache and scanning a long history is waste.
+    // Scan from the END: this.messages is persistent; an earlier turn's tagged
+    // message would be found first by findIndex, misplacing the breakpoint if
+    // fetch_tools is called more than once with release_after_read in the same run.
+    let readOnceIdx = -1;
+    if (!options.disableCache) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if ((messages[i] as Message).releaseAfterRead) { readOnceIdx = i; break; }
+      }
+    }
     // Any read-once message → explicit path, so it stays out of the cached
     // prefix. (When it's the first message there's simply no message-prefix
     // breakpoint to place; system + tools still cache, the read-once doesn't.)

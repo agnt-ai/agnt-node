@@ -654,8 +654,10 @@ export default class BaseExecutor {
         // (Anthropic) — see Message.releaseAfterRead.
         const call = taggedToolCalls.find(tc => tc.id === r.tool_call_id);
         const releaseAfterRead = call?.args?.release_after_read === true;
-        const msg: any = { role: 'tool', tool_call_id: r.tool_call_id, content: JSON.stringify(r.content) };
-        if (releaseAfterRead) msg.releaseAfterRead = true;
+        const msg: Message = {
+          role: 'tool', tool_call_id: r.tool_call_id, content: JSON.stringify(r.content),
+          ...(releaseAfterRead ? { releaseAfterRead: true } : {}),
+        };
         this.messages.push(msg);
       }
 
