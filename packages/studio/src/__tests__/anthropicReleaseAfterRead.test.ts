@@ -1,11 +1,12 @@
 /**
- * RR release_after_read — Anthropic cache-breakpoint placement.
+ * Anthropic prompt caching — always-on block-level breakpoints.
  *
- * Verifies that when a tool result is flagged `releaseAfterRead`, the adapter
- * switches that call to explicit block-level cache breakpoints that cache the
- * stable prefix (system + tools + transcript up to the read-once boundary) but
- * keep the read-once message OUT of the cached prefix — so its first inclusion
- * isn't written to cache. The common (unflagged) path is unchanged.
+ * The adapter ALWAYS uses explicit block-level cache_control (system block +
+ * last tool + message-tail), because a top-level cache_control is not honored
+ * by Anthropic (the old default left cache_read=0). `release_after_read`-flagged
+ * tool results stay in the UNCACHED suffix (the breakpoint sits before trailing
+ * read-once messages) so we don't pay to write content about to leave.
+ * disableCache (one-shot callers) places no cache_control at all.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -45,23 +46,27 @@ function lastCacheControl(block: any) {
 
 beforeEach(() => { vi.clearAllMocks(); anthropicCreate.mockResolvedValue(RESP); });
 
-describe('Anthropic cache — common path (no release_after_read)', () => {
-  it('uses top-level cache_control and a string system', async () => {
+describe('Anthropic cache — default path (always block-level)', () => {
+  it('caches system-block + tools + the message tail; no top-level flag', async () => {
     const ex = new AnthropicExecutor(makeConfig());
     await ex.invoke([{ role: 'system', content: 'SYS' }, { role: 'user', content: 'hi' }], { tools: TOOLS });
     const params = anthropicCreate.mock.calls[0][0];
-    expect(params.cache_control).toEqual({ type: 'ephemeral' });
-    expect(typeof params.system).toBe('string');
-    // no block-level breakpoint on the lone tool
-    expect(params.tools[params.tools.length - 1].cache_control).toBeUndefined();
+    expect(params.cache_control).toBeUndefined();                       // top-level flag gone
+    expect(Array.isArray(params.system)).toBe(true);                    // system is a cached block
+    expect(params.system[0].cache_control).toEqual({ type: 'ephemeral' });
+    expect(params.tools[params.tools.length - 1].cache_control).toEqual({ type: 'ephemeral' });
+    // the (only) message is the stable tail → gets the message breakpoint
+    expect(lastCacheControl(params.messages[params.messages.length - 1])).toEqual({ type: 'ephemeral' });
   });
 
-  it('disableCache sets no cache_control at all', async () => {
+  it('disableCache sets no cache_control anywhere (string system, no blocks)', async () => {
     const ex = new AnthropicExecutor(makeConfig());
     await ex.invoke([{ role: 'system', content: 'SYS' }, { role: 'user', content: 'hi' }], { tools: TOOLS, disableCache: true });
     const params = anthropicCreate.mock.calls[0][0];
     expect(params.cache_control).toBeUndefined();
     expect(typeof params.system).toBe('string');
+    expect(params.tools[params.tools.length - 1].cache_control).toBeUndefined();
+    expect(lastCacheControl(params.messages[params.messages.length - 1])).toBeUndefined();
   });
 });
 

@@ -73,7 +73,9 @@ describe('Anthropic adapter translation', () => {
   it('image_url → image.source.base64, file → document', async () => {
     anthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } });
     const ex = new AnthropicExecutor(makeConfig('anthropic', 'claude-haiku-4-5', { anthropic: { apiKey: 'k' } }));
-    await ex.invoke(multimodalTurn as any);
+    // disableCache → isolate content translation from the message-tail cache
+    // breakpoint, which would otherwise attach cache_control to the last block.
+    await ex.invoke(multimodalTurn as any, { disableCache: true });
 
     const content = anthropicCreate.mock.calls[0][0].messages[0].content;
     expect(content).toContainEqual({ type: 'text', text: 'look at these' });
