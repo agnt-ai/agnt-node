@@ -61,68 +61,55 @@ export default class AnthropicExecutor extends BaseExecutor {
       messages: this.#formatMessages(messages),
       ...providerParams // Spread all provider-specific params
     };
-    // Set cache_control for multi-turn agent runs (Prime) so the large system
-    // prompt is cached and reused across turns within the 5-min TTL.
-    // One-shot callers (QA, ignore/duplicate checks, etc.) pass disableCache: true
-    // to skip this — they have no follow-up turn to benefit from the cache, so
-    // the write surcharge (~25% on input tokens) is pure waste.
-    // RR release_after_read: a tool result the agent declared it will read once
-    // and drop. To avoid paying the cache-write surcharge on content that's
-    // about to leave context, we must keep it OUT of the cached prefix. The
-    // top-level cache_control can't express "cache up to here, not past it", so
-    // when such a message exists we switch THIS call to explicit block-level
-    // breakpoints: cache system + tools + the transcript prefix up to (but not
-    // including) the earliest read-once message. If the agent keeps the content
-    // (doesn't release it), a later turn no longer has it as the read-once
-    // boundary and it falls back into the cached prefix — the spec's recovery.
-    // Skip the scan entirely on one-shot callers (disableCache: true) — they
-    // can never reach useExplicitCache and scanning a long history is waste.
-    // Scan from the END: this.messages is persistent; an earlier turn's tagged
-    // message would be found first by findIndex, misplacing the breakpoint if
-    // fetch_tools is called more than once with release_after_read in the same run.
-    let readOnceIdx = -1;
-    if (!options.disableCache) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if ((messages[i] as Message).releaseAfterRead) { readOnceIdx = i; break; }
-      }
-    }
-    // Any read-once message → explicit path, so it stays out of the cached
-    // prefix. (When it's the first message there's simply no message-prefix
-    // breakpoint to place; system + tools still cache, the read-once doesn't.)
-    const useExplicitCache = !options.disableCache && readOnceIdx !== -1;
+    // ── Prompt caching: ALWAYS explicit block-level breakpoints ──────────────
+    // A top-level `cache_control` is NOT honored by Anthropic (cache_control
+    // lives on content blocks), which left the big stable prefix re-written
+    // every turn with cache_read=0. We place real breakpoints instead, in
+    // Anthropic's prefix order (tools → system → messages):
+    //   1. tools        — stable across the run → a READ after turn 1
+    //   2. system        — the big stable prefix → a READ after turn 1
+    //   3. message-tail  — the latest message that is NOT a trailing
+    //                      `release_after_read` result. Kept messages READ
+    //                      turn-over-turn; an already-cached prefix is a cache
+    //                      HIT (no re-write — only genuinely new tokens write).
+    //
+    // `release_after_read` (the agent's "I'll read this once and drop it"
+    // warning): trailing flagged results stay in the UNCACHED suffix, so we
+    // never pay the write surcharge on content that's about to leave. A
+    // `release` that stubs an EARLIER message only invalidates from that point —
+    // tools, system, and the prefix before it still read.
+    //
+    // One-shot callers (QA, ignore/duplicate checks, etc.) pass disableCache:
+    // true — no follow-up turn, so any write surcharge is pure waste.
+    const cacheOn = !options.disableCache;
+    const EPHEMERAL = { type: 'ephemeral' as const };
 
-    if (!options.disableCache && !useExplicitCache) {
-      // Common path — unchanged.
-      params.cache_control = { type: 'ephemeral' };
-    }
-
-    // Add system parameter if we have system messages
+    // System as a cached block.
     if (systemContent) {
-      params.system = useExplicitCache
-        ? [{ type: 'text', text: systemContent, cache_control: { type: 'ephemeral' } }]
+      params.system = cacheOn
+        ? [{ type: 'text', text: systemContent, cache_control: EPHEMERAL }]
         : systemContent;
     }
 
-    // Add tools if provided
+    // Tools — cache the last def so the whole (stable) tools array is one
+    // cached segment.
     if (options.tools && options.tools.length > 0) {
-      params.tools = options.tools.map((t: any) => {
-        return this.#formatTool(t);
-      });
-      // Cache the tools block in the explicit path (stable across turns).
-      if (useExplicitCache && params.tools.length > 0) {
+      params.tools = options.tools.map((t: any) => this.#formatTool(t));
+      if (cacheOn && params.tools.length > 0) {
         const last = params.tools[params.tools.length - 1];
-        params.tools[params.tools.length - 1] = { ...last, cache_control: { type: 'ephemeral' } };
+        params.tools[params.tools.length - 1] = { ...last, cache_control: EPHEMERAL };
       }
     }
 
-    // Place the message-prefix breakpoint just before the read-once tail.
-    if (useExplicitCache) {
-      // Map source index → formatted index: #formatMessages drops system
-      // messages and preserves order 1:1 for the rest.
-      const sysBefore = messages.slice(0, readOnceIdx).filter(m => m.role === 'system').length;
-      const bpIdx = (readOnceIdx - sysBefore) - 1;
-      if (bpIdx >= 0 && params.messages[bpIdx]) {
-        this.#attachCacheControl(params.messages[bpIdx]);
+    // Message-tail breakpoint at the last NON-(trailing-read-once) message.
+    // #formatMessages drops system messages and is 1:1 (same order) with the
+    // non-system source messages, so the formatted array aligns with them.
+    if (cacheOn && params.messages.length > 0) {
+      const nonSystem = messages.filter(m => m.role !== 'system');
+      let k = nonSystem.length - 1;
+      while (k >= 0 && (nonSystem[k] as Message).releaseAfterRead) k--;
+      if (k >= 0 && params.messages[k]) {
+        this.#attachCacheControl(params.messages[k]);
       }
     }
 
