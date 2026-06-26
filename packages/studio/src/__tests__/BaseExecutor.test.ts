@@ -592,3 +592,82 @@ describe('invokeWithFallback — transient 529 behavior', () => {
     expect(ex.invoke).toHaveBeenCalledTimes(1); // did NOT try the fallback model
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// invokeWithFallback — cross-provider hop (the prod incident: both Anthropic
+// models timed out and the configured openai/gpt tail was never reached)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('invokeWithFallback — cross-provider fallback', () => {
+  it('delegates to executorFactory when the next model is a different provider', async () => {
+    // Mirrors the Medium tier: sonnet → opus → gpt, the first two Anthropic
+    // models time out, so the cascade must cross to OpenAI via the factory.
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'claude-sonnet-4-6', fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'claude-opus-4-8',   fallbackOrder: 1 },
+        { provider: 'openai',    model: 'gpt-5.4',           fallbackOrder: 2 },
+      ] },
+    });
+
+    const subInvoke = vi.fn().mockResolvedValue({
+      message: { role: 'assistant', content: 'from gpt' }, usage: {},
+    });
+    const executorFactory = vi.fn().mockResolvedValue({ invoke: subInvoke });
+
+    const ex = new TestExecutor(makeConfig(manifest, { executorFactory })) as any;
+    // Both Anthropic attempts time out (retryable); the OpenAI hop is delegated.
+    ex.invoke = vi.fn().mockRejectedValue(new Error('Request timed out.'));
+
+    const result = await ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {});
+
+    expect(result.message.content).toBe('from gpt');
+    expect(ex.invoke).toHaveBeenCalledTimes(2); // sonnet + opus, same client
+    expect(executorFactory).toHaveBeenCalledTimes(1);
+    // Factory gets a manifest narrowed to just the cross-provider model.
+    const factoryConfig = executorFactory.mock.calls[0][0];
+    expect(factoryConfig.manifest.spec.models).toEqual([
+      { provider: 'openai', model: 'gpt-5.4', fallbackOrder: 2 },
+    ]);
+    expect(subInvoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('a cross-provider sub-invoke that fails retryably continues to the next model', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'claude-opus-4-8', fallbackOrder: 0 },
+        { provider: 'openai',    model: 'gpt-5.4',         fallbackOrder: 1 },
+        { provider: 'google',    model: 'gemini-pro',      fallbackOrder: 2 },
+      ] },
+    });
+
+    // First factory call (openai) times out; second (google) succeeds.
+    const executorFactory = vi.fn()
+      .mockResolvedValueOnce({ invoke: vi.fn().mockRejectedValue(new Error('Request timed out.')) })
+      .mockResolvedValueOnce({ invoke: vi.fn().mockResolvedValue({ message: { role: 'assistant', content: 'from gemini' }, usage: {} }) });
+
+    const ex = new TestExecutor(makeConfig(manifest, { executorFactory })) as any;
+    ex.invoke = vi.fn().mockRejectedValue(new Error('Request timed out.')); // opus times out
+
+    const result = await ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {});
+
+    expect(result.message.content).toBe('from gemini');
+    expect(ex.invoke).toHaveBeenCalledTimes(1);          // opus only
+    expect(executorFactory).toHaveBeenCalledTimes(2);    // openai then google
+  });
+
+  it('without an executorFactory, a cross-provider hop is skipped and lastError surfaces', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'claude-opus-4-8', fallbackOrder: 0 },
+        { provider: 'openai',    model: 'gpt-5.4',         fallbackOrder: 1 },
+      ] },
+    });
+    const ex = new TestExecutor(makeConfig(manifest)) as any; // no executorFactory
+    ex.invoke = vi.fn().mockRejectedValue(new Error('Request timed out.'));
+
+    await expect(ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {}))
+      .rejects.toThrow('Request timed out.');
+    expect(ex.invoke).toHaveBeenCalledTimes(1); // openai hop skipped, not delegated
+  });
+});
