@@ -31,11 +31,18 @@ export default class AnthropicExecutor extends BaseExecutor {
       // spikes at the SDK layer with exponential backoff before they ever reach
       // the executor's model-fallback path. The SDK default is 2, which a brief
       // capacity blip can exhaust — surfacing as a hard error mid-run.
-      // timeout: 30 s per attempt — SDK default is 600 s, which with maxRetries:5
-      // would allow up to 50 min per model on a hung request (past Lambda's 300 s
-      // limit). 5 × 30 s = 150 s worst case, leaving room for the tool loop.
-      maxRetries: 5,
-      timeout: 30_000,
+      // timeout: 120 s per attempt. A heavy Prime turn carries ~30k tokens of
+      // context and generates a long, non-streaming response (a full deck /
+      // report) that legitimately needs >30 s — the old 30 s ceiling timed those
+      // turns out, then retried 5× (re-sending the whole context each retry →
+      // inflated cost + wasted cache writes) and eventually failed the run. The
+      // worker Lambda timeout is 15 min and checkpoints at 14 min, so a single
+      // turn must finish well inside that window: 120 s × 3 = 360 s worst case
+      // (plus SDK backoff), comfortably under the 14-min checkpoint and leaving
+      // room for the tool loop. SDK default timeout is 600 s, which with a high
+      // retry count could blow past the checkpoint on a hung request.
+      maxRetries: 3,
+      timeout: 120_000,
       dangerouslyAllowBrowser: anthropicCreds.dangerouslyAllowBrowser
     });
 

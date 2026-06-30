@@ -30,10 +30,13 @@ export default class DeepSeekExecutor extends BaseExecutor {
       // Absorb transient rate-limit (429) / 5xx / timeout spikes at the SDK
       // layer with exponential backoff before the executor's model-fallback
       // path. SDK default is 2; bump so a brief blip doesn't fail the run.
-      // timeout: 30 s per attempt — SDK default is 600 s; 5 × 30 s = 150 s
-      // worst case on a hung request, well within Lambda's 300 s limit.
-      maxRetries: 5,
-      timeout: 30_000,
+      // timeout: 120 s per attempt — a heavy turn's long, non-streaming response
+      // legitimately needs >30 s, and the old 30 s ceiling timed it out then
+      // retried (re-sending the whole context each retry). The worker Lambda
+      // timeout is 15 min (checkpoints at 14 min), so 120 s × 3 = 360 s worst
+      // case sits comfortably under the checkpoint. SDK default timeout is 600 s.
+      maxRetries: 3,
+      timeout: 120_000,
       dangerouslyAllowBrowser: deepseekCreds.dangerouslyAllowBrowser
     });
 

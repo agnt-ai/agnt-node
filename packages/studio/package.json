@@ -1,6 +1,6 @@
 {
   "name": "@agnt-sdk/studio",
-  "version": "0.0.33",
+  "version": "0.0.35",
   "description": "V2 manifest-based LLM executor for agnt prompts with CLI",
   "type": "module",
   "main": "./dist/index.js",
