@@ -17,7 +17,9 @@ export { default as ImageCache } from './ImageCache.js';
 export { default as AnthropicExecutor } from './providers/anthropic.js';
 export { default as OpenAIExecutor } from './providers/openai.js';
 export { default as BedrockExecutor } from './providers/bedrock.js';
-export { default as DeepSeekExecutor } from './providers/deepseek.js';
+export { default as OpenAICompatibleExecutor, OPENAI_COMPATIBLE_BASE_URLS, OPENAI_COMPATIBLE_PROVIDERS } from './providers/openaiCompatible.js';
+// Back-compat alias: DeepSeek is now served by the shared openai-compatible adapter.
+export { default as DeepSeekExecutor } from './providers/openaiCompatible.js';
 export { default as GoogleExecutor } from './providers/google.js';
 
 // ── Condition evaluation ──────────────────────────────────────────────────────

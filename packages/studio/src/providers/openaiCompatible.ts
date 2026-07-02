@@ -1,0 +1,242 @@
+/**
+ * OpenAICompatibleExecutor — shared adapter for OpenAI-compatible providers
+ *
+ * One adapter for every provider that speaks the OpenAI Chat Completions wire
+ * format: Together AI (Kimi / Qwen), Fireworks, DeepInfra, DeepSeek, and any
+ * future open-model host. Per-provider differences — base URL, credentials,
+ * model IDs, pricing, cache behavior — live in CONFIG, never in code:
+ *
+ *   - baseURL:  resolved from OPENAI_COMPATIBLE_BASE_URLS[provider], overridable
+ *               by credentials[provider].baseURL or model metadata.baseURL.
+ *   - apiKey:   credentials[provider].apiKey (via the existing secret manager;
+ *               never stored in manifest/config rows).
+ *   - model:    manifest.spec.models[].model.
+ *   - params:   manifest.spec.models[].metadata (temperature, top_p, …).
+ *
+ * Adding a new OpenAI-compatible provider is therefore a config + credentials
+ * change (new AiModel row + creds entry), with no new adapter code required —
+ * unless it needs a base URL we don't know, which is a one-line registry entry.
+ *
+ * CACHING: these providers do AUTOMATIC (best-effort) prefix caching — the
+ * provider caches transparently, there is no billed cache write, and cached
+ * reads are reported back in usage.prompt_tokens_details.cached_tokens. We map
+ * that to cache_read_input_tokens and leave cache_creation_input_tokens at 0
+ * (there is no write concept here; the backend renders it as "—" / null based
+ * on the model's cacheMode). We never send Anthropic-style cache_control blocks
+ * — they are not part of the OpenAI wire format and must not leak through.
+ */
+
+import OpenAI from 'openai';
+import BaseExecutor from '../BaseExecutor.js';
+import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
+
+/** Known OpenAI-compatible provider base URLs. A provider not listed here is
+ *  still usable by supplying baseURL via credentials or model metadata. */
+export const OPENAI_COMPATIBLE_BASE_URLS: Record<string, string> = {
+  together:  'https://api.together.ai/v1',
+  fireworks: 'https://api.fireworks.ai/inference/v1',
+  deepinfra: 'https://api.deepinfra.com/v1/openai',
+  deepseek:  'https://api.deepseek.com/v1',
+};
+
+/** Providers routed through this adapter. Keep in sync with executorFactory. */
+export const OPENAI_COMPATIBLE_PROVIDERS = new Set(Object.keys(OPENAI_COMPATIBLE_BASE_URLS));
+
+export default class OpenAICompatibleExecutor extends BaseExecutor {
+  private client: OpenAI;
+  private providerName: string;
+
+  constructor(config: BaseExecutorConfig) {
+    super(config);
+
+    // this.provider is set by BaseExecutor from the selected model config.
+    this.providerName = (this.provider || '').toLowerCase();
+
+    // Credentials are keyed by provider name. Real provider strings are
+    // lowercase ('together', 'deepseek'), but tolerate the original casing too.
+    const credMap = this.credentials as Record<string, any>;
+    const creds = credMap[this.provider] ?? credMap[this.providerName];
+    if (!creds) {
+      throw new Error(`[OpenAICompatibleExecutor] credentials.${this.providerName} is required`);
+    }
+    if (!creds.apiKey) {
+      throw new Error(`[OpenAICompatibleExecutor] credentials.${this.providerName}.apiKey is required`);
+    }
+
+    // baseURL resolution order: creds override → model metadata → registry.
+    const metadata = ((this.primaryModelConfig as any).metadata || {}) as Record<string, any>;
+    const baseURL =
+      creds.baseURL ||
+      metadata.baseURL ||
+      OPENAI_COMPATIBLE_BASE_URLS[this.providerName];
+    if (!baseURL) {
+      throw new Error(
+        `[OpenAICompatibleExecutor] no baseURL for provider "${this.providerName}" — ` +
+        `add one to OPENAI_COMPATIBLE_BASE_URLS, credentials.${this.providerName}.baseURL, or model metadata.baseURL`
+      );
+    }
+
+    // Initialize OpenAI-compatible client. Retry/timeout tuning matches the
+    // other adapters: absorb transient 429/5xx/timeout spikes at the SDK layer
+    // with backoff before the executor's model-fallback path kicks in.
+    this.client = new OpenAI({
+      apiKey: creds.apiKey,
+      baseURL,
+      maxRetries: 5,
+      timeout: 30_000,
+      dangerouslyAllowBrowser: creds.dangerouslyAllowBrowser,
+    });
+
+    this.log(`[OpenAICompatibleExecutor] Initialized ${this.providerName} @ ${baseURL} with model: ${this.model}`);
+  }
+
+  /**
+   * Invoke the OpenAI-compatible API.
+   * Returns: { message: { role, content, tool_calls }, usage: {...disjoint buckets} }
+   */
+  async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
+    const params: any = {
+      model: this.model,
+      messages: this.#formatMessages(messages),
+    };
+
+    // Pass through provider-specific params from model config (temperature, top_p, …).
+    Object.assign(params, this.#extractProviderParams());
+
+    if (options.tools && options.tools.length > 0) {
+      params.tools = options.tools.map(t => this.#formatTool(t));
+      // Explicit parallel tool calls — OpenAI-compatible default; set so it
+      // can't silently regress and matches parallel behavior across providers.
+      params.parallel_tool_calls = true;
+    }
+
+    if (options.tool_choice && options.tool_choice !== 'auto') {
+      params.tool_choice = this.#formatToolChoice(options.tool_choice);
+    }
+
+    this.log(`[OpenAICompatibleExecutor:${this.providerName}] Invoking:`, {
+      model: params.model,
+      temperature: params.temperature,
+      top_p: params.top_p,
+      tools: params.tools?.length || 0,
+    });
+
+    const response = await this.client.chat.completions.create(params);
+
+    const choice = response.choices[0];
+    const message = choice.message;
+
+    // Automatic-cache providers report cached prefix tokens as a SUBSET of
+    // prompt_tokens (same convention as OpenAI direct). We subtract them out so
+    // input_tokens is the UNCACHED count and the four usage buckets stay
+    // disjoint across providers — otherwise cached reads get billed twice (once
+    // as input, once as read). cache_creation is 0: these providers have no
+    // billed write concept.
+    //
+    // Field location is NOT consistent across OpenAI-compatible hosts: OpenAI
+    // direct and Together's dedicated-inference docs nest it at
+    // prompt_tokens_details.cached_tokens, but Together's OpenAI-compat surface
+    // documents a top-level usage.cached_tokens, and some hosts omit
+    // prompt_tokens_details entirely. Read both so a cache hit is never
+    // silently missed (a missed field reads as 0% hit rate → ~5x cost on our
+    // cache-heavy workload, and fails silently — the spec's highest-risk case).
+    // NOTE: prompt_tokens-is-cache-inclusive must be confirmed with a live
+    // Together call during the experiment; if a host reports cached ADDITIVELY,
+    // this subtraction under-counts input and needs a per-host flag.
+    const usageTyped = response.usage as typeof response.usage & {
+      cached_tokens?: number;
+      prompt_tokens_details?: { cached_tokens?: number };
+    };
+    const cachedTokens =
+      usageTyped?.prompt_tokens_details?.cached_tokens ??
+      usageTyped?.cached_tokens ??
+      0;
+
+    return {
+      message: {
+        role: message.role,
+        content: message.content || '',
+        tool_calls: this.#extractToolCalls(message.tool_calls),
+      },
+      usage: {
+        input_tokens: Math.max(0, response.usage!.prompt_tokens - cachedTokens),
+        output_tokens: response.usage!.completion_tokens,
+        cache_read_input_tokens: cachedTokens,
+        cache_creation_input_tokens: 0,
+      },
+    };
+  }
+
+  hasToolCalls(message: Message): boolean {
+    return Boolean(message?.tool_calls && message.tool_calls.length > 0);
+  }
+
+  /** Format messages for the OpenAI wire format. */
+  #formatMessages(messages: Message[]): any[] {
+    return messages.map(msg => {
+      if (msg.role === 'tool') {
+        return { role: 'tool', tool_call_id: msg.tool_call_id, content: msg.content };
+      }
+      return { role: msg.role, content: msg.content };
+    });
+  }
+
+  /** Format a tool definition to OpenAI format from any of our known shapes. */
+  #formatTool(tool: any): any {
+    if (tool.type === 'function' && tool.function) return tool;
+    if (tool.function) return { type: 'function', function: tool.function };
+    if (tool.input_schema) {
+      return {
+        type: 'function',
+        function: { name: tool.name, description: tool.description || '', parameters: tool.input_schema },
+      };
+    }
+    if (tool.parameters) {
+      return {
+        type: 'function',
+        function: { name: tool.name, description: tool.description || '', parameters: tool.parameters },
+      };
+    }
+    this.log(`[OpenAICompatibleExecutor:${this.providerName}] Warning: Unrecognized tool format:`, JSON.stringify(tool));
+    return {
+      type: 'function',
+      function: {
+        name: tool.name || 'unknown',
+        description: tool.description || '',
+        parameters: tool.parameters || tool.input_schema || { type: 'object', properties: {} },
+      },
+    };
+  }
+
+  /** Format tool_choice to OpenAI format. */
+  #formatToolChoice(toolChoice: any): any {
+    if (typeof toolChoice === 'string') {
+      if (toolChoice === 'required' || toolChoice === 'any') return 'required';
+      return 'auto';
+    }
+    if (toolChoice.type === 'function' || toolChoice.function?.name) return toolChoice;
+    // Anthropic format: { type: "tool", name: "..." }
+    if (toolChoice.type === 'tool' && toolChoice.name) {
+      return { type: 'function', function: { name: toolChoice.name } };
+    }
+    return 'auto';
+  }
+
+  /** Extract tool calls from an OpenAI-compatible response. */
+  #extractToolCalls(toolCalls: any[] | undefined): any[] {
+    if (!toolCalls || toolCalls.length === 0) return [];
+    return toolCalls.map(tc => ({
+      id: tc.id,
+      name: tc.function.name,
+      args: JSON.parse(tc.function.arguments),
+    }));
+  }
+
+  /** Provider-specific params from model config metadata (excludes non-API keys). */
+  #extractProviderParams(): Record<string, any> {
+    const metadata = (this.primaryModelConfig as any).metadata || {};
+    // Strip keys that are adapter config, not model-call params.
+    const { displayName, baseURL, cacheMode, quantization, ...providerParams } = metadata;
+    return providerParams;
+  }
+}

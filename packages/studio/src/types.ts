@@ -57,14 +57,28 @@ export interface ProviderCredentials {
     accessKeyId?: string;
     secretAccessKey?: string;
   };
-  deepseek?: {
-    apiKey: string;
-    dangerouslyAllowBrowser?: boolean;
-  };
+  deepseek?: OpenAICompatibleCredentials;
   google?: {
     apiKey: string;
     dangerouslyAllowBrowser?: boolean;
   };
+  // OpenAI-compatible open-model hosts (Together, Fireworks, DeepInfra, …).
+  // All share OpenAICompatibleExecutor; adding one is a creds entry + AiModel
+  // catalog row — no new adapter code. baseURL is optional: it also resolves
+  // from the provider registry or the model config's metadata.
+  together?: OpenAICompatibleCredentials;
+  fireworks?: OpenAICompatibleCredentials;
+  deepinfra?: OpenAICompatibleCredentials;
+  // Permit additional OpenAI-compatible providers by name without a type change
+  // (satisfies "new openai-compatible provider = config + credentials only").
+  [provider: string]: any;
+}
+
+export interface OpenAICompatibleCredentials {
+  apiKey: string;
+  /** Override the provider registry / model-metadata base URL. */
+  baseURL?: string;
+  dangerouslyAllowBrowser?: boolean;
 }
 
 export interface ToolHandler {

@@ -4,15 +4,21 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('../providers/anthropic.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'anthropic' })) }));
 vi.mock('../providers/openai.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'openai' })) }));
 vi.mock('../providers/bedrock.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'bedrock' })) }));
-vi.mock('../providers/deepseek.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'deepseek' })) }));
 vi.mock('../providers/google.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'google' })) }));
+// DeepSeek / Together / Fireworks / DeepInfra all share the OpenAI-compatible
+// executor. Mock it AND re-export the provider set the factory imports.
+vi.mock('../providers/openaiCompatible.js', () => ({
+  default: vi.fn().mockImplementation(() => ({ provider: 'openai-compatible' })),
+  OPENAI_COMPATIBLE_PROVIDERS: new Set(['together', 'fireworks', 'deepinfra', 'deepseek']),
+  OPENAI_COMPATIBLE_BASE_URLS: {},
+}));
 
 import { createExecutor } from '../executorFactory.js';
 import AnthropicExecutor from '../providers/anthropic.js';
 import OpenAIExecutor from '../providers/openai.js';
 import BedrockExecutor from '../providers/bedrock.js';
-import DeepSeekExecutor from '../providers/deepseek.js';
 import GoogleExecutor from '../providers/google.js';
+import OpenAICompatibleExecutor from '../providers/openaiCompatible.js';
 
 function makeManifest(provider: string) {
   return {
@@ -62,9 +68,20 @@ describe('createExecutor', () => {
     expect(BedrockExecutor).toHaveBeenCalled();
   });
 
-  it('creates DeepSeek executor for provider=deepseek', async () => {
+  it('creates OpenAI-compatible executor for provider=deepseek', async () => {
     await createExecutor({ manifest: makeManifest('deepseek'), credentials: {} });
-    expect(DeepSeekExecutor).toHaveBeenCalled();
+    expect(OpenAICompatibleExecutor).toHaveBeenCalled();
+  });
+
+  it('creates OpenAI-compatible executor for provider=together (Kimi/Qwen)', async () => {
+    await createExecutor({ manifest: makeManifest('together'), credentials: {} });
+    expect(OpenAICompatibleExecutor).toHaveBeenCalled();
+  });
+
+  it('routes an unknown provider through OpenAI-compatible when model metadata carries a baseURL', async () => {
+    const manifest = { spec: { models: [{ provider: 'newhost', model: 'm', metadata: { baseURL: 'https://api.newhost.ai/v1' } }] } } as any;
+    await createExecutor({ manifest, credentials: {} });
+    expect(OpenAICompatibleExecutor).toHaveBeenCalled();
   });
 
   it('creates Google executor for provider=google', async () => {
