@@ -380,6 +380,13 @@ export default class BaseExecutor {
    * claude-opus → gpt-5) can't reuse the client — it spawns a provider-correct
    * executor via the injected executorFactory and delegates the single invoke.
    * Non-retryable errors (4xx auth/validation) are re-thrown immediately.
+   *
+   * Known limitation: this.modelPricing is resolved once, for the primary
+   * model, before any fallback happens (see AgntExecutor.resolveModelPricing).
+   * A turn served by a fallback model — same-provider or cross-provider —
+   * still costs using the primary model's rate card. provider/model naming is
+   * corrected on fallback (see below); pricing is not. Pre-existing, not
+   * introduced here — flagging so it isn't mistaken for fixed.
    */
   protected async invokeWithFallback(messages: Message[], options: InvokeOptions): Promise<InvokeResult> {
     const orderedModels = [...this.manifest.spec.models].sort(
@@ -414,7 +421,17 @@ export default class BaseExecutor {
             manifest: { ...this.manifest, spec: { ...this.manifest.spec, models: [modelConfig] } },
             messages,
           });
-          return await sub.invoke(messages, options);
+          const subResult = await sub.invoke(messages, options);
+          // Sync provider/model state onto `this` so downstream attribution
+          // (sendTurnTrace's model field, calculateCost's pricing lookup) reflects
+          // the model that actually served this turn, not the original primary —
+          // mirrors the same-provider branch below. Only after a successful
+          // invoke: on failure we fall through to the catch and keep looping,
+          // and must not have mutated state for a hop that didn't pan out.
+          this.primaryModelConfig = { ...modelConfig, name: modelConfig.model };
+          this.provider = modelConfig.provider;
+          this.model = modelConfig.model;
+          return subResult;
         }
 
         if (i > 0) {

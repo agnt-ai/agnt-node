@@ -630,6 +630,12 @@ describe('invokeWithFallback — cross-provider fallback', () => {
       { provider: 'openai', model: 'gpt-5.4', fallbackOrder: 2 },
     ]);
     expect(subInvoke).toHaveBeenCalledTimes(1);
+    // Provider/model state syncs to the model that actually served the turn,
+    // so downstream cost/trace attribution (sendTurnTrace, calculateCost)
+    // doesn't keep reporting the original primary (claude-sonnet-4-6).
+    expect(ex.provider).toBe('openai');
+    expect(ex.model).toBe('gpt-5.4');
+    expect(ex.primaryModelConfig.name).toBe('gpt-5.4');
   });
 
   it('a cross-provider sub-invoke that fails retryably continues to the next model', async () => {
@@ -654,6 +660,29 @@ describe('invokeWithFallback — cross-provider fallback', () => {
     expect(result.message.content).toBe('from gemini');
     expect(ex.invoke).toHaveBeenCalledTimes(1);          // opus only
     expect(executorFactory).toHaveBeenCalledTimes(2);    // openai then google
+    expect(ex.provider).toBe('google'); // synced to the model that actually served it, not openai
+    expect(ex.model).toBe('gemini-pro');
+  });
+
+  it('a failed cross-provider hop does not mutate provider/model state before falling through', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'claude-opus-4-8', fallbackOrder: 0 },
+        { provider: 'openai',    model: 'gpt-5.4',         fallbackOrder: 1 },
+      ] },
+    });
+    const executorFactory = vi.fn().mockResolvedValue({
+      invoke: vi.fn().mockRejectedValue(new Error('Request timed out.')),
+    });
+    const ex = new TestExecutor(makeConfig(manifest, { executorFactory })) as any;
+    ex.invoke = vi.fn().mockRejectedValue(new Error('Request timed out.'));
+
+    await expect(ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {}))
+      .rejects.toThrow('Request timed out.');
+    // Both models exhausted retryably — state must still reflect the last
+    // successfully-provisioned model (opus), not a hop that never returned.
+    expect(ex.provider).toBe('anthropic');
+    expect(ex.model).toBe('claude-opus-4-8');
   });
 
   it('without an executorFactory, a cross-provider hop is skipped and lastError surfaces', async () => {
