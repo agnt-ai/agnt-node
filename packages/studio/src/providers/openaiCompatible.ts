@@ -29,6 +29,7 @@
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
+import { streamWithRetry, consumeOpenAIStream, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
 
 /** Known OpenAI-compatible provider base URLs. A provider not listed here is
  *  still usable by supplying baseURL via credentials or model metadata. */
@@ -76,14 +77,18 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
       );
     }
 
-    // Initialize OpenAI-compatible client. Retry/timeout tuning matches the
-    // other adapters: absorb transient 429/5xx/timeout spikes at the SDK layer
-    // with backoff before the executor's model-fallback path kicks in.
+    // Initialize OpenAI-compatible client. invoke() STREAMS and bounds the
+    // response with an inter-chunk IDLE timeout (see streaming.ts), so a
+    // long-but-progressing turn — exactly Kimi doing multi-tool agentic work —
+    // never races a total-completion timeout. The client `timeout` here is only
+    // the SDK's own absolute request cap; set it to the streaming backstop and
+    // let the idle timeout be the operative ceiling. maxRetries matches the
+    // other streamed adapters.
     this.client = new OpenAI({
       apiKey: creds.apiKey,
       baseURL,
-      maxRetries: 5,
-      timeout: 30_000,
+      maxRetries: 3,
+      timeout: STREAM_ABSOLUTE_BACKSTOP_MS,
       dangerouslyAllowBrowser: creds.dangerouslyAllowBrowser,
     });
 
@@ -121,7 +126,25 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
       tools: params.tools?.length || 0,
     });
 
-    const response = await this.client.chat.completions.create(params);
+    // STREAMED: consumeOpenAIStream reassembles content + tool_call arg deltas
+    // back into the exact non-streamed completion shape, so the extraction below
+    // is unchanged. Each chunk bumps the idle timer; a transient failure retries
+    // the whole prompt. stream_options.include_usage rides usage on the final
+    // chunk (guarded below — not all OpenAI-compatible hosts honor it).
+    const response = await streamWithRetry(
+      async (guard) => {
+        const stream = await this.client.chat.completions.create(
+          { ...params, stream: true, stream_options: { include_usage: true } },
+          { signal: guard.signal }
+        );
+        return await consumeOpenAIStream(stream as any, () => guard.bump());
+      },
+      {
+        externalSignal: options.signal,
+        isRetryable: (err) => this.isRetryableError(err),
+        log: (m) => this.log(m),
+      }
+    );
 
     const choice = response.choices[0];
     const message = choice.message;
@@ -151,16 +174,22 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
       usageTyped?.prompt_tokens_details?.cached_tokens ??
       usageTyped?.cached_tokens ??
       0;
+    // Streamed usage rides the final include_usage chunk. Real OpenAI/Together
+    // send it, but guard so a host that omits it yields 0s instead of a crash
+    // on response.usage!.  If a host silently drops usage, cost → 0 and the
+    // credit engine under-bills — LIVE-VERIFY Together honors include_usage.
+    const promptTokens = response.usage?.prompt_tokens ?? 0;
+    const completionTokens = response.usage?.completion_tokens ?? 0;
 
     return {
       message: {
-        role: message.role,
+        role: message.role as Message['role'],
         content: message.content || '',
         tool_calls: this.#extractToolCalls(message.tool_calls),
       },
       usage: {
-        input_tokens: Math.max(0, response.usage!.prompt_tokens - cachedTokens),
-        output_tokens: response.usage!.completion_tokens,
+        input_tokens: Math.max(0, promptTokens - cachedTokens),
+        output_tokens: completionTokens,
         cache_read_input_tokens: cachedTokens,
         cache_creation_input_tokens: 0,
       },
