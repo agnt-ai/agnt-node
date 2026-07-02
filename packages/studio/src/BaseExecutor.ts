@@ -46,6 +46,8 @@ export default class BaseExecutor {
   protected toolErrorCount: Record<string, number>;
   protected forceNextTool?: string;
   protected executorFactory?: (config: BaseExecutorConfig) => Promise<any>;
+  /** The config this executor was built from — reused to spawn cross-provider fallback executors. */
+  protected baseConfig: BaseExecutorConfig;
   protected instructions: string;
   protected primaryModelConfig: V2ModelConfig & { name: string };
   protected provider: string;
@@ -60,24 +62,26 @@ export default class BaseExecutor {
   protected disableCache: boolean;
   protected hooks?: HookRegistry;
 
-  constructor({
-    manifest,
-    variables = {},
-    toolRouter,
-    credentials,
-    messages = [],
-    onToolCall,
-    hooks,
-    log = console.log,
-    logLevel = 'info',
-    tracing,
-    files,
-    maxMessages = 50,
-    initialToolChoice,
-    executorFactory,
-    modelPricing,
-    disableCache = false,
-  }: BaseExecutorConfig) {
+  constructor(config: BaseExecutorConfig) {
+    const {
+      manifest,
+      variables = {},
+      toolRouter,
+      credentials,
+      messages = [],
+      onToolCall,
+      hooks,
+      log = console.log,
+      logLevel = 'info',
+      tracing,
+      files,
+      maxMessages = 50,
+      initialToolChoice,
+      executorFactory,
+      modelPricing,
+      disableCache = false,
+    } = config;
+    this.baseConfig = config;
     this.manifest = manifest;
     if (!this.manifest) throw new Error('[BaseExecutor] manifest is required');
 
@@ -371,10 +375,18 @@ export default class BaseExecutor {
    *
    * Tries models in fallbackOrder. On a retryable error (5xx, overloaded, rate
    * limit, network drop) it switches to the next model in the list and retries.
-   * Same-provider fallback (e.g. claude-opus → claude-sonnet) works by updating
-   * this.model in-place; cross-provider fallback requires executorFactory and is
-   * not yet implemented (non-retryable path will throw normally).
+   * Same-provider fallback (e.g. claude-opus → claude-sonnet) reuses this client
+   * by pointing this.model at the next model. Cross-provider fallback (e.g.
+   * claude-opus → gpt-5) can't reuse the client — it spawns a provider-correct
+   * executor via the injected executorFactory and delegates the single invoke.
    * Non-retryable errors (4xx auth/validation) are re-thrown immediately.
+   *
+   * Known limitation: this.modelPricing is resolved once, for the primary
+   * model, before any fallback happens (see AgntExecutor.resolveModelPricing).
+   * A turn served by a fallback model — same-provider or cross-provider —
+   * still costs using the primary model's rate card. provider/model naming is
+   * corrected on fallback (see below); pricing is not. Pre-existing, not
+   * introduced here — flagging so it isn't mistaken for fixed.
    */
   protected async invokeWithFallback(messages: Message[], options: InvokeOptions): Promise<InvokeResult> {
     const orderedModels = [...this.manifest.spec.models].sort(
@@ -385,23 +397,49 @@ export default class BaseExecutor {
 
     for (let i = 0; i < orderedModels.length; i++) {
       const modelConfig = orderedModels[i];
+      // Only treat as cross-provider on a genuine fallback hop. At i=0 we always
+      // use the already-selected primary, so non-fallback routing strategies
+      // (random/conditional) keep their existing behavior.
+      const crossProvider = i > 0 && modelConfig.provider !== this.provider;
 
       if (i > 0) {
-        if (modelConfig.provider !== this.provider) {
-          // Cross-provider fallback requires executorFactory — skip for now.
-          this.log(
-            `[BaseExecutor] Skipping cross-provider fallback to ${modelConfig.provider}/${modelConfig.model} ` +
-            `(executorFactory cross-provider not yet implemented)`
-          );
-          continue;
-        }
-        this.log(`[BaseExecutor] ${orderedModels[i - 1].model} failed — falling back to ${modelConfig.model}`);
-        this.primaryModelConfig = { ...modelConfig, name: modelConfig.model };
-        this.provider = modelConfig.provider;
-        this.model = modelConfig.model;
+        this.log(`[BaseExecutor] ${orderedModels[i - 1].model} failed — falling back to ${modelConfig.provider}/${modelConfig.model}`);
       }
 
       try {
+        if (crossProvider) {
+          // Different provider than the current client — swapping this.model in
+          // place would send the request through the wrong SDK. Build a
+          // provider-correct executor from this executor's own config (manifest
+          // narrowed to just this model) and delegate the single invoke.
+          if (!this.executorFactory) {
+            this.log(`[BaseExecutor] No executorFactory — cannot fall back to ${modelConfig.provider}/${modelConfig.model}, skipping`);
+            continue;
+          }
+          const sub = await this.executorFactory({
+            ...this.baseConfig,
+            manifest: { ...this.manifest, spec: { ...this.manifest.spec, models: [modelConfig] } },
+            messages,
+          });
+          const subResult = await sub.invoke(messages, options);
+          // Sync provider/model state onto `this` so downstream attribution
+          // (sendTurnTrace's model field, calculateCost's pricing lookup) reflects
+          // the model that actually served this turn, not the original primary —
+          // mirrors the same-provider branch below. Only after a successful
+          // invoke: on failure we fall through to the catch and keep looping,
+          // and must not have mutated state for a hop that didn't pan out.
+          this.primaryModelConfig = { ...modelConfig, name: modelConfig.model };
+          this.provider = modelConfig.provider;
+          this.model = modelConfig.model;
+          return subResult;
+        }
+
+        if (i > 0) {
+          // Same provider — reuse this client, just point it at the next model.
+          this.primaryModelConfig = { ...modelConfig, name: modelConfig.model };
+          this.provider = modelConfig.provider;
+          this.model = modelConfig.model;
+        }
         return await this.invoke(messages, options);
       } catch (error: any) {
         if (this.isRetryableError(error)) {
