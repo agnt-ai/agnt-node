@@ -84,6 +84,24 @@ describe('createExecutor', () => {
     expect(OpenAICompatibleExecutor).toHaveBeenCalled();
   });
 
+  it('keeps native providers native even when the model config carries metadata.baseURL', async () => {
+    // metadata.baseURL is the escape hatch for UNKNOWN openai-compatible hosts —
+    // it must NOT divert an Anthropic/Google/Bedrock call into the OpenAI-wire
+    // adapter (which would send the request in the wrong format).
+    // This file has no beforeEach mock-clear, so reset before asserting not-called.
+    vi.clearAllMocks();
+    const anthropic = { spec: { models: [{ provider: 'anthropic', model: 'claude-x', metadata: { baseURL: 'https://x' } }] } } as any;
+    await createExecutor({ manifest: anthropic, credentials: {} });
+    expect(AnthropicExecutor).toHaveBeenCalled();
+    expect(OpenAICompatibleExecutor).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    const google = { spec: { models: [{ provider: 'gemini', model: 'g', metadata: { baseURL: 'https://x' } }] } } as any;
+    await createExecutor({ manifest: google, credentials: {} });
+    expect(GoogleExecutor).toHaveBeenCalled();
+    expect(OpenAICompatibleExecutor).not.toHaveBeenCalled();
+  });
+
   it('creates Google executor for provider=google', async () => {
     await createExecutor({ manifest: makeManifest('google'), credentials: {} });
     expect(GoogleExecutor).toHaveBeenCalled();

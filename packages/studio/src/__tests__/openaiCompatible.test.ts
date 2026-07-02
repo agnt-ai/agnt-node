@@ -137,6 +137,21 @@ describe('OpenAICompatibleExecutor — cache-read capture (Together / Kimi)', ()
     expect(usage.input_tokens).toBe(40);
   });
 
+  it('captures DeepSeek-style prompt_cache_hit_tokens', async () => {
+    mockStream({
+      choices: [{ message: { role: 'assistant', content: 'hi' } }],
+      usage: { prompt_tokens: 10_000, completion_tokens: 200, prompt_cache_hit_tokens: 9_000, prompt_cache_miss_tokens: 1_000 },
+    });
+
+    const ex = new OpenAICompatibleExecutor(
+      makeConfig('deepseek', 'deepseek-chat', { deepseek: { apiKey: 'k' } }),
+    );
+    const { usage } = await ex.invoke([{ role: 'user', content: 'hi' }]);
+
+    expect(usage.cache_read_input_tokens).toBe(9_000);
+    expect(usage.input_tokens).toBe(1_000); // 10k - 9k uncached
+  });
+
   it('reports 0 cache reads when the provider returns no cached_tokens (cold prefix)', async () => {
     mockStream({
       choices: [{ message: { role: 'assistant', content: 'hi' } }],
@@ -180,6 +195,18 @@ describe('OpenAICompatibleExecutor — streaming', () => {
     expect(params.stream_options).toEqual({ include_usage: true });
     // Idle-abort signal is threaded to the client call (second arg).
     expect(openaiCreate.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('translates an Anthropic-shaped tool_choice into OpenAI format', async () => {
+    mockStream({ choices: [{ message: { role: 'assistant', content: 'x' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    const ex = new OpenAICompatibleExecutor(makeConfig('together', 'moonshotai/Kimi-K2', { together: { apiKey: 'k' } }));
+    await ex.invoke(
+      [{ role: 'user', content: 'hi' }],
+      { tools: [{ name: 'lookup', description: 'd', parameters: { type: 'object', properties: {} } }] as any,
+        tool_choice: { type: 'tool', name: 'lookup' } as any },
+    );
+    // { type:'tool', name } (Anthropic) → { type:'function', function:{ name } } (OpenAI).
+    expect(openaiCreate.mock.calls[0][0].tool_choice).toEqual({ type: 'function', function: { name: 'lookup' } });
   });
 
   it('accumulates fragmented tool_call argument deltas back into parsed args', async () => {
@@ -256,6 +283,12 @@ describe('OpenAICompatibleExecutor — config-driven baseURL + credentials', () 
       makeConfig('together', 'moonshotai/Kimi-K2', { together: { apiKey: 'k', baseURL: 'https://proxy.internal/v1' } }),
     );
     expect(openaiCtor.mock.calls[0][0].baseURL).toBe('https://proxy.internal/v1');
+  });
+
+  it('throws when the provider creds exist but have no apiKey', () => {
+    expect(
+      () => new OpenAICompatibleExecutor(makeConfig('together', 'moonshotai/Kimi-K2', { together: {} as any })),
+    ).toThrow(/credentials\.together\.apiKey is required/);
   });
 
   it('throws a clear error when credentials for the provider are missing', () => {

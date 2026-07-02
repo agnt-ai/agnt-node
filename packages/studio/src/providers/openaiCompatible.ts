@@ -156,23 +156,27 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
     // as input, once as read). cache_creation is 0: these providers have no
     // billed write concept.
     //
-    // Field location is NOT consistent across OpenAI-compatible hosts: OpenAI
-    // direct and Together's dedicated-inference docs nest it at
-    // prompt_tokens_details.cached_tokens, but Together's OpenAI-compat surface
-    // documents a top-level usage.cached_tokens, and some hosts omit
-    // prompt_tokens_details entirely. Read both so a cache hit is never
-    // silently missed (a missed field reads as 0% hit rate → ~5x cost on our
-    // cache-heavy workload, and fails silently — the spec's highest-risk case).
-    // NOTE: prompt_tokens-is-cache-inclusive must be confirmed with a live
-    // Together call during the experiment; if a host reports cached ADDITIVELY,
-    // this subtraction under-counts input and needs a per-host flag.
+    // Field location is NOT consistent across OpenAI-compatible hosts. Read all
+    // known spellings so a cache hit is never silently missed (a missed field
+    // reads as 0% hit rate → ~5x cost on our cache-heavy workload, and fails
+    // silently — the spec's highest-risk case):
+    //   - OpenAI direct / Together dedicated-inference: nested
+    //     prompt_tokens_details.cached_tokens
+    //   - Together OpenAI-compat surface: top-level cached_tokens
+    //   - DeepSeek: prompt_cache_hit_tokens (with prompt_cache_miss_tokens)
+    // All three are a SUBSET of prompt_tokens, so subtracting keeps input
+    // uncached. NOTE: prompt_tokens-is-cache-inclusive must be confirmed with a
+    // live Together call; if a host reports cached ADDITIVELY, this subtraction
+    // under-counts input and needs a per-host flag.
     const usageTyped = response.usage as typeof response.usage & {
       cached_tokens?: number;
+      prompt_cache_hit_tokens?: number;
       prompt_tokens_details?: { cached_tokens?: number };
     };
     const cachedTokens =
       usageTyped?.prompt_tokens_details?.cached_tokens ??
       usageTyped?.cached_tokens ??
+      usageTyped?.prompt_cache_hit_tokens ??
       0;
     // Streamed usage rides the final include_usage chunk. Real OpenAI/Together
     // send it, but guard so a host that omits it yields 0s instead of a crash
