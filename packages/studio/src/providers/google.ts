@@ -8,6 +8,7 @@ import { GoogleGenerativeAI, Content, Part, FunctionDeclaration, Tool } from '@g
 import BaseExecutor from '../BaseExecutor.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { fileToGeminiPart } from './fileAttachment.js';
+import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
 
 export default class GoogleExecutor extends BaseExecutor {
   private client: GoogleGenerativeAI;
@@ -89,12 +90,41 @@ export default class GoogleExecutor extends BaseExecutor {
       tools: options.tools?.length || 0
     });
 
-    // Call Gemini API
-    const result = await model.generateContent({
-      contents
-    });
+    // Call Gemini API — STREAMED. Iterating `result.stream` bumps the idle timer
+    // per chunk; `result.response` then resolves to the aggregated
+    // GenerateContentResponse used for content/toolCalls/usage extraction below.
+    // A mid-stream failure discards the partial and retries the whole prompt. The
+    // requestOptions timeout is the SDK's own total cap (set to the streaming
+    // backstop); the idle timeout is operative.
+    //
+    // We ALSO collect the raw per-chunk parts. The SDK's response aggregator
+    // (aggregateResponses) rebuilds each part copying only text/functionCall/
+    // executableCode/codeExecutionResult — it DROPS `thought`/`thoughtSignature`.
+    // The non-streamed path returned the raw candidate parts with the signature
+    // intact, and `rawParts` exists precisely to echo thought parts back verbatim
+    // on later turns (required by Gemini thinking models). So rawParts must come
+    // from the raw stream chunks, not the stripped aggregate.
+    const { response, streamedParts } = await streamWithRetry(
+      async (guard) => {
+        const result = await model.generateContentStream(
+          { contents },
+          { signal: guard.signal, timeout: STREAM_ABSOLUTE_BACKSTOP_MS }
+        );
+        const streamedParts: any[] = [];
+        for await (const chunk of result.stream) {
+          guard.bump();
+          const parts = (chunk as any)?.candidates?.[0]?.content?.parts;
+          if (Array.isArray(parts)) streamedParts.push(...parts);
+        }
+        return { response: await result.response, streamedParts };
+      },
+      {
+        externalSignal: options.signal,
+        isRetryable: (err) => this.isRetryableError(err),
+        log: (m) => this.log(m),
+      }
+    );
 
-    const response = result.response;
     const candidate = response.candidates?.[0];
 
     if (!candidate) {
@@ -126,13 +156,15 @@ export default class GoogleExecutor extends BaseExecutor {
     };
 
     // rawParts preserves thought parts (incl. thoughtSignature) so they can be
-    // echoed back verbatim in subsequent turns — required by Gemini thinking models.
+    // echoed back verbatim in subsequent turns — required by Gemini thinking
+    // models. Prefer the raw stream chunks (signature intact); fall back to the
+    // aggregated candidate parts only if the stream yielded none.
     return {
       message: {
         role: 'assistant',
         content: textContent,
         tool_calls: toolCalls,
-        rawParts: candidate.content.parts ?? []
+        rawParts: streamedParts.length > 0 ? streamedParts : (candidate.content.parts ?? [])
       },
       usage
     };

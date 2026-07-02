@@ -10,11 +10,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { anthropicMessageStream } from './_streamMocks.js';
 
-const anthropicCreate = vi.fn();
+// invoke() streams via messages.stream(params, opts); assert on its params.
+const anthropicStream = vi.fn();
 vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({
-    messages: { create: anthropicCreate },
+    messages: { stream: anthropicStream },
   })),
 }));
 
@@ -44,13 +46,13 @@ function lastCacheControl(block: any) {
   return undefined;
 }
 
-beforeEach(() => { vi.clearAllMocks(); anthropicCreate.mockResolvedValue(RESP); });
+beforeEach(() => { vi.clearAllMocks(); anthropicStream.mockReturnValue(anthropicMessageStream(RESP)); });
 
 describe('Anthropic cache — default path (always block-level)', () => {
   it('caches system-block + tools + the message tail; no top-level flag', async () => {
     const ex = new AnthropicExecutor(makeConfig());
     await ex.invoke([{ role: 'system', content: 'SYS' }, { role: 'user', content: 'hi' }], { tools: TOOLS });
-    const params = anthropicCreate.mock.calls[0][0];
+    const params = anthropicStream.mock.calls[0][0];
     expect(params.cache_control).toBeUndefined();                       // top-level flag gone
     expect(Array.isArray(params.system)).toBe(true);                    // system is a cached block
     expect(params.system[0].cache_control).toEqual({ type: 'ephemeral' });
@@ -62,7 +64,7 @@ describe('Anthropic cache — default path (always block-level)', () => {
   it('disableCache sets no cache_control anywhere (string system, no blocks)', async () => {
     const ex = new AnthropicExecutor(makeConfig());
     await ex.invoke([{ role: 'system', content: 'SYS' }, { role: 'user', content: 'hi' }], { tools: TOOLS, disableCache: true });
-    const params = anthropicCreate.mock.calls[0][0];
+    const params = anthropicStream.mock.calls[0][0];
     expect(params.cache_control).toBeUndefined();
     expect(typeof params.system).toBe('string');
     expect(params.tools[params.tools.length - 1].cache_control).toBeUndefined();
@@ -81,7 +83,7 @@ describe('Anthropic cache — release_after_read present', () => {
   it('drops the top-level flag and caches system as a block', async () => {
     const ex = new AnthropicExecutor(makeConfig());
     await ex.invoke(msgs, { tools: TOOLS });
-    const params = anthropicCreate.mock.calls[0][0];
+    const params = anthropicStream.mock.calls[0][0];
     expect(params.cache_control).toBeUndefined();              // no top-level
     expect(Array.isArray(params.system)).toBe(true);
     expect(params.system[0].cache_control).toEqual({ type: 'ephemeral' });
@@ -90,14 +92,14 @@ describe('Anthropic cache — release_after_read present', () => {
   it('caches the tools block', async () => {
     const ex = new AnthropicExecutor(makeConfig());
     await ex.invoke(msgs, { tools: TOOLS });
-    const params = anthropicCreate.mock.calls[0][0];
+    const params = anthropicStream.mock.calls[0][0];
     expect(params.tools[params.tools.length - 1].cache_control).toEqual({ type: 'ephemeral' });
   });
 
   it('places the breakpoint BEFORE the read-once message, not on it', async () => {
     const ex = new AnthropicExecutor(makeConfig());
     await ex.invoke(msgs, { tools: TOOLS });
-    const params = anthropicCreate.mock.calls[0][0];
+    const params = anthropicStream.mock.calls[0][0];
     // formatted (system filtered): [0]=user, [1]=assistant(tool_use), [2]=tool_result(read-once)
     expect(lastCacheControl(params.messages[1])).toEqual({ type: 'ephemeral' }); // breakpoint
     expect(lastCacheControl(params.messages[2])).toBeUndefined();                 // read-once excluded
@@ -112,7 +114,7 @@ describe('Anthropic cache — release_after_read present', () => {
       [{ role: 'system', content: 'SYS' }, { role: 'tool', tool_call_id: 't0', content: 'x', releaseAfterRead: true }],
       { tools: TOOLS },
     );
-    const params = anthropicCreate.mock.calls[0][0];
+    const params = anthropicStream.mock.calls[0][0];
     expect(params.cache_control).toBeUndefined();                 // no top-level write of the tail
     expect(Array.isArray(params.system)).toBe(true);              // system still cached
     expect(params.system[0].cache_control).toEqual({ type: 'ephemeral' });

@@ -13,7 +13,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  anthropicMessageStream,
+  openAIStreamFromCompletion,
+  googleStreamResult,
+} from './_streamMocks.js';
 
+// invoke() streams; the adapters see the same params. We assert the exact
+// payload handed to each provider's stream call.
 const openaiCreate = vi.fn();
 vi.mock('openai', () => ({
   default: vi.fn().mockImplementation(() => ({
@@ -21,17 +28,17 @@ vi.mock('openai', () => ({
   })),
 }));
 
-const googleGenerateContent = vi.fn();
+const googleGenerateContentStream = vi.fn();
 vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
-    getGenerativeModel: () => ({ generateContent: googleGenerateContent }),
+    getGenerativeModel: () => ({ generateContentStream: googleGenerateContentStream }),
   })),
 }));
 
-const anthropicCreate = vi.fn();
+const anthropicStream = vi.fn();
 vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({
-    messages: { create: anthropicCreate },
+    messages: { stream: anthropicStream },
   })),
 }));
 
@@ -71,13 +78,13 @@ beforeEach(() => vi.clearAllMocks());
 
 describe('Anthropic adapter translation', () => {
   it('image_url → image.source.base64, file → document', async () => {
-    anthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } });
+    anthropicStream.mockReturnValue(anthropicMessageStream({ content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } }));
     const ex = new AnthropicExecutor(makeConfig('anthropic', 'claude-haiku-4-5', { anthropic: { apiKey: 'k' } }));
     // disableCache → isolate content translation from the message-tail cache
     // breakpoint, which would otherwise attach cache_control to the last block.
     await ex.invoke(multimodalTurn as any, { disableCache: true });
 
-    const content = anthropicCreate.mock.calls[0][0].messages[0].content;
+    const content = anthropicStream.mock.calls[0][0].messages[0].content;
     expect(content).toContainEqual({ type: 'text', text: 'look at these' });
     expect(content).toContainEqual({
       type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'SGVsbG8=' },
@@ -90,13 +97,13 @@ describe('Anthropic adapter translation', () => {
 
 describe('Google adapter translation', () => {
   it('image_url AND file → inlineData parts', async () => {
-    googleGenerateContent.mockResolvedValue({
-      response: { candidates: [{ content: { parts: [{ text: 'ok' }] } }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } },
-    });
+    googleGenerateContentStream.mockResolvedValue(
+      googleStreamResult({ candidates: [{ content: { parts: [{ text: 'ok' }] } }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } })
+    );
     const ex = new GoogleExecutor(makeConfig('google', 'gemini-2.0-flash', { google: { apiKey: 'k' } }));
     await ex.invoke(multimodalTurn as any);
 
-    const parts = googleGenerateContent.mock.calls[0][0].contents[0].parts;
+    const parts = googleGenerateContentStream.mock.calls[0][0].contents[0].parts;
     expect(parts).toContainEqual({ text: 'look at these' });
     expect(parts).toContainEqual({ inlineData: { mimeType: 'image/jpeg', data: 'SGVsbG8=' } });
     expect(parts).toContainEqual({ inlineData: { mimeType: 'application/pdf', data: 'JVBERi0x' } });
@@ -105,10 +112,12 @@ describe('Google adapter translation', () => {
 
 describe('OpenAI adapter translation', () => {
   it('passes image_url and file blocks through unchanged (OpenAI-native)', async () => {
-    openaiCreate.mockResolvedValue({
-      choices: [{ message: { role: 'assistant', content: 'ok' } }],
-      usage: { prompt_tokens: 1, completion_tokens: 1 },
-    });
+    openaiCreate.mockImplementation(async () =>
+      openAIStreamFromCompletion({
+        choices: [{ message: { role: 'assistant', content: 'ok' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      })
+    );
     const ex = new OpenAIExecutor(makeConfig('openai', 'gpt-4o', { openai: { apiKey: 'k' } }));
     await ex.invoke(multimodalTurn as any);
 
