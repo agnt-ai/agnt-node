@@ -10,12 +10,22 @@
  * OpenAI's prompt_tokens and Google's promptTokenCount INCLUDE the cached
  * tokens, so the provider adapters must subtract the cached count back out.
  * These tests pin that behaviour and prove cache reads aren't double-counted.
+ *
+ * invoke() now STREAMS, so these run through the streaming mocks — which also
+ * proves usage survives the stream-assembly path unchanged (final usage event).
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  anthropicMessageStream,
+  openAIStreamFromCompletion,
+  googleStreamResult,
+} from './_streamMocks.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SDK mocks — capture the raw provider usage shapes and return canned responses
+// SDK mocks — now stream: chat.completions.create({stream}) yields chunks,
+// messages.stream() returns a MessageStream, generateContentStream() yields the
+// aggregated response. The canned final usage rides the stream in each case.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const openaiCreate = vi.fn();
@@ -25,17 +35,17 @@ vi.mock('openai', () => ({
   })),
 }));
 
-const googleGenerateContent = vi.fn();
+const googleGenerateContentStream = vi.fn();
 vi.mock('@google/generative-ai', () => ({
   GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
-    getGenerativeModel: () => ({ generateContent: googleGenerateContent }),
+    getGenerativeModel: () => ({ generateContentStream: googleGenerateContentStream }),
   })),
 }));
 
-const anthropicCreate = vi.fn();
+const anthropicStream = vi.fn();
 vi.mock('@anthropic-ai/sdk', () => ({
   default: vi.fn().mockImplementation(() => ({
-    messages: { create: anthropicCreate },
+    messages: { stream: anthropicStream },
   })),
 }));
 
@@ -74,6 +84,18 @@ function makeConfig(provider: string, model: string, creds: any): BaseExecutorCo
   } as BaseExecutorConfig;
 }
 
+// Feed an OpenAI completion through the streaming mock (fresh generator per call).
+function openaiReturns(completion: any) {
+  openaiCreate.mockImplementation(async () => openAIStreamFromCompletion(completion));
+}
+
+// Feed a Gemini aggregated response through the streaming mock.
+function googleReturns(usageMetadata: any) {
+  googleGenerateContentStream.mockImplementation(async () =>
+    googleStreamResult({ candidates: [{ content: { parts: [{ text: 'hi' }] } }], usageMetadata })
+  );
+}
+
 // Inclusive prompt total = uncached input + cache_read + cache_creation.
 // This is what sumInputTokens() reconstructs and what LangSmith wants.
 function inclusiveInputTotal(u: {
@@ -98,7 +120,7 @@ beforeEach(() => {
 
 describe('OpenAIExecutor usage normalization', () => {
   it('subtracts cached_tokens from prompt_tokens so input_tokens is UNCACHED', async () => {
-    openaiCreate.mockResolvedValue({
+    openaiReturns({
       choices: [{ message: { role: 'assistant', content: 'hi', tool_calls: undefined } }],
       usage: {
         prompt_tokens: 1000, // INCLUDES the 300 cached
@@ -117,7 +139,7 @@ describe('OpenAIExecutor usage normalization', () => {
   });
 
   it('keeps buckets disjoint: inclusive total still equals raw prompt_tokens', async () => {
-    openaiCreate.mockResolvedValue({
+    openaiReturns({
       choices: [{ message: { role: 'assistant', content: 'hi' } }],
       usage: {
         prompt_tokens: 1000,
@@ -136,7 +158,7 @@ describe('OpenAIExecutor usage normalization', () => {
   });
 
   it('no cache reads: input_tokens equals prompt_tokens', async () => {
-    openaiCreate.mockResolvedValue({
+    openaiReturns({
       choices: [{ message: { role: 'assistant', content: 'hi' } }],
       usage: { prompt_tokens: 800, completion_tokens: 20 },
     });
@@ -150,7 +172,7 @@ describe('OpenAIExecutor usage normalization', () => {
   });
 
   it('cost is not double-charged for cache reads (disjoint pricing)', async () => {
-    openaiCreate.mockResolvedValue({
+    openaiReturns({
       choices: [{ message: { role: 'assistant', content: 'hi' } }],
       usage: {
         prompt_tokens: 1_000_000, // includes 1M cached
@@ -177,7 +199,7 @@ describe('OpenAIExecutor usage normalization', () => {
   });
 
   it('clamps to 0 if cached_tokens somehow exceeds prompt_tokens', async () => {
-    openaiCreate.mockResolvedValue({
+    openaiReturns({
       choices: [{ message: { role: 'assistant', content: 'hi' } }],
       usage: {
         prompt_tokens: 100,
@@ -199,23 +221,12 @@ describe('OpenAIExecutor usage normalization', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('GoogleExecutor usage normalization', () => {
-  function mockResponse(usageMetadata: any) {
-    return {
-      response: {
-        candidates: [{ content: { parts: [{ text: 'hi' }] } }],
-        usageMetadata,
-      },
-    };
-  }
-
   it('subtracts cachedContentTokenCount so input_tokens is UNCACHED', async () => {
-    googleGenerateContent.mockResolvedValue(
-      mockResponse({
-        promptTokenCount: 2000, // INCLUDES the 800 cached
-        candidatesTokenCount: 100,
-        cachedContentTokenCount: 800,
-      })
-    );
+    googleReturns({
+      promptTokenCount: 2000, // INCLUDES the 800 cached
+      candidatesTokenCount: 100,
+      cachedContentTokenCount: 800,
+    });
 
     const ex = new GoogleExecutor(makeConfig('google', 'gemini-2.0-flash', { google: { apiKey: 'k' } }));
     const { usage } = await ex.invoke([{ role: 'user', content: 'hi' }]);
@@ -227,13 +238,11 @@ describe('GoogleExecutor usage normalization', () => {
   });
 
   it('keeps buckets disjoint: inclusive total equals raw promptTokenCount', async () => {
-    googleGenerateContent.mockResolvedValue(
-      mockResponse({
-        promptTokenCount: 2000,
-        candidatesTokenCount: 100,
-        cachedContentTokenCount: 800,
-      })
-    );
+    googleReturns({
+      promptTokenCount: 2000,
+      candidatesTokenCount: 100,
+      cachedContentTokenCount: 800,
+    });
 
     const ex = new GoogleExecutor(makeConfig('google', 'gemini-2.0-flash', { google: { apiKey: 'k' } }));
     const { usage } = await ex.invoke([{ role: 'user', content: 'hi' }]);
@@ -243,14 +252,12 @@ describe('GoogleExecutor usage normalization', () => {
   });
 
   it('still folds thoughtsTokenCount into output tokens', async () => {
-    googleGenerateContent.mockResolvedValue(
-      mockResponse({
-        promptTokenCount: 500,
-        candidatesTokenCount: 40,
-        thoughtsTokenCount: 60,
-        cachedContentTokenCount: 100,
-      })
-    );
+    googleReturns({
+      promptTokenCount: 500,
+      candidatesTokenCount: 40,
+      thoughtsTokenCount: 60,
+      cachedContentTokenCount: 100,
+    });
 
     const ex = new GoogleExecutor(makeConfig('google', 'gemini-2.5-pro', { google: { apiKey: 'k' } }));
     const { usage } = await ex.invoke([{ role: 'user', content: 'hi' }]);
@@ -261,9 +268,7 @@ describe('GoogleExecutor usage normalization', () => {
   });
 
   it('no cache: input_tokens equals promptTokenCount', async () => {
-    googleGenerateContent.mockResolvedValue(
-      mockResponse({ promptTokenCount: 500, candidatesTokenCount: 40 })
-    );
+    googleReturns({ promptTokenCount: 500, candidatesTokenCount: 40 });
 
     const ex = new GoogleExecutor(makeConfig('google', 'gemini-2.0-flash', { google: { apiKey: 'k' } }));
     const { usage } = await ex.invoke([{ role: 'user', content: 'hi' }]);
@@ -273,13 +278,11 @@ describe('GoogleExecutor usage normalization', () => {
   });
 
   it('cost is not double-charged for cache reads (disjoint pricing)', async () => {
-    googleGenerateContent.mockResolvedValue(
-      mockResponse({
-        promptTokenCount: 1_000_000,
-        candidatesTokenCount: 0,
-        cachedContentTokenCount: 1_000_000,
-      })
-    );
+    googleReturns({
+      promptTokenCount: 1_000_000,
+      candidatesTokenCount: 0,
+      cachedContentTokenCount: 1_000_000,
+    });
 
     const ex = new GoogleExecutor(makeConfig('google', 'gemini-2.0-flash', { google: { apiKey: 'k' } }));
     const { usage } = await ex.invoke([{ role: 'user', content: 'hi' }]);
@@ -301,15 +304,17 @@ describe('GoogleExecutor usage normalization', () => {
 
 describe('AnthropicExecutor usage normalization (already disjoint)', () => {
   it('passes through input_tokens unchanged (cache already excluded)', async () => {
-    anthropicCreate.mockResolvedValue({
-      content: [{ type: 'text', text: 'hi' }],
-      usage: {
-        input_tokens: 700, // Anthropic: UNCACHED only, disjoint from cache buckets
-        output_tokens: 50,
-        cache_read_input_tokens: 300,
-        cache_creation_input_tokens: 120,
-      },
-    });
+    anthropicStream.mockReturnValue(
+      anthropicMessageStream({
+        content: [{ type: 'text', text: 'hi' }],
+        usage: {
+          input_tokens: 700, // Anthropic: UNCACHED only, disjoint from cache buckets
+          output_tokens: 50,
+          cache_read_input_tokens: 300,
+          cache_creation_input_tokens: 120,
+        },
+      })
+    );
 
     const ex = new AnthropicExecutor(
       makeConfig('anthropic', 'claude-sonnet-4-5', { anthropic: { apiKey: 'k' } })

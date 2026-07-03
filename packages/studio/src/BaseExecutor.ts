@@ -31,6 +31,7 @@ import { evaluateCondition } from './conditions.js';
 import { sendTrace } from './tracing.js';
 import { SYSTEM_TOOL_NAMES } from './systemTools.js';
 import { normalizeToolResult } from './openclawAdapter.js';
+import { StreamAbortError } from './providers/streaming.js';
 import type { HookRegistry } from './hooks.js';
 
 export default class BaseExecutor {
@@ -43,6 +44,9 @@ export default class BaseExecutor {
   protected messages: Message[];
   protected onToolCall?: ToolCallCallback;
   protected cancelled: boolean;
+  /** Per-run abort signal. cancel() aborts it so an in-flight token stream stops
+   *  cleanly (the provider adapters thread it into their streaming call). */
+  protected abortController: AbortController;
   protected toolErrorCount: Record<string, number>;
   protected forceNextTool?: string;
   protected executorFactory?: (config: BaseExecutorConfig) => Promise<any>;
@@ -99,6 +103,7 @@ export default class BaseExecutor {
     this._initialMessageCount = messages.length;
     this.onToolCall = onToolCall;
     this.cancelled = false;
+    this.abortController = new AbortController();
     this.toolErrorCount = {};
     this.forceNextTool = undefined;
     this.tracing = tracing;
@@ -334,6 +339,10 @@ export default class BaseExecutor {
 
   cancel(): boolean {
     this.cancelled = true;
+    // Abort any in-flight token stream immediately rather than waiting for the
+    // between-turns cancelled check — a long streamed response could otherwise
+    // keep running for the full backstop after a stop.
+    this.abortController.abort();
     return true;
   }
 
@@ -341,7 +350,13 @@ export default class BaseExecutor {
   // Model fallback
   // ─────────────────────────────────────────────────────────────────────────────
 
-  private isRetryableError(error: any): boolean {
+  // Provider adapters call this to classify a mid-stream failure for retry.
+  protected isRetryableError(error: any): boolean {
+    // A streamed attempt that exhausted its in-place retries on an IDLE stall is
+    // a model-health signal — fall back to the next model. A backstop (a stream
+    // that dribbled to the absolute ceiling) or an external abort (caller stop)
+    // is terminal: don't waste another model on it.
+    if (error instanceof StreamAbortError) return error.reason === 'idle';
     // HTTP status codes from Anthropic, OpenAI, Google, etc.
     const status = typeof error?.status === 'number' ? error.status : undefined;
     if (status !== undefined) {
@@ -587,6 +602,7 @@ export default class BaseExecutor {
         tools: enableToolCalls ? this.allToolDefs : [],
         tool_choice: enableToolCalls ? toolChoice : 'none',
         disableCache: this.disableCache,
+        signal: this.abortController.signal,
       });
       const turnDuration = Date.now() - turnStart;
 
@@ -732,7 +748,7 @@ export default class BaseExecutor {
       const toolChoice = this.normalizeToolChoice(toolChoiceStr);
 
       const turnStart = Date.now();
-      const result = await this.invokeWithFallback(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice, disableCache: this.disableCache });
+      const result = await this.invokeWithFallback(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice, disableCache: this.disableCache, signal: this.abortController.signal });
       const turnDuration = Date.now() - turnStart;
 
       usage.inputTokens         += this.sumInputTokens(result.usage);              // total for display

@@ -165,6 +165,10 @@ export interface InvokeOptions {
    *  no follow-up turn to hit the cache — avoids paying the 25% write surcharge
    *  with zero benefit. Agent/Prime multi-turn runs should NOT set this. */
   disableCache?: boolean;
+  /** Caller's abort signal (backend stop/timeout). Threaded to the provider's
+   *  streaming call so an in-flight token stream stops cleanly. Set by
+   *  BaseExecutor from its per-run AbortController (see cancel()). */
+  signal?: AbortSignal;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

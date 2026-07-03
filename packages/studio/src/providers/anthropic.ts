@@ -8,6 +8,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import BaseExecutor from '../BaseExecutor.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { fileToAnthropicDocument } from './fileAttachment.js';
+import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
 
 export default class AnthropicExecutor extends BaseExecutor {
   private client: Anthropic;
@@ -31,11 +32,14 @@ export default class AnthropicExecutor extends BaseExecutor {
       // spikes at the SDK layer with exponential backoff before they ever reach
       // the executor's model-fallback path. The SDK default is 2, which a brief
       // capacity blip can exhaust — surfacing as a hard error mid-run.
-      // timeout: 30 s per attempt — SDK default is 600 s, which with maxRetries:5
-      // would allow up to 50 min per model on a hung request (past Lambda's 300 s
-      // limit). 5 × 30 s = 150 s worst case, leaving room for the tool loop.
-      maxRetries: 5,
-      timeout: 30_000,
+      // `invoke()` STREAMS the response (see below) and bounds it with an
+      // inter-chunk IDLE timeout, so a long-but-progressing turn (a full deck /
+      // report) never times out. The client `timeout` here is only the SDK's own
+      // total-request cap; we set it to the streaming absolute backstop so the
+      // SDK never kills a healthily-streaming response shorter than our own idle
+      // guard would. It is not the operative ceiling — the idle timeout is.
+      maxRetries: 3,
+      timeout: STREAM_ABSOLUTE_BACKSTOP_MS,
       dangerouslyAllowBrowser: anthropicCreds.dangerouslyAllowBrowser
     });
 
@@ -118,9 +122,26 @@ export default class AnthropicExecutor extends BaseExecutor {
       params.tool_choice = this.#formatToolChoice(options.tool_choice);
     }
 
-    // Call Anthropic API
+    // Call Anthropic API — STREAMED. `messages.stream()` accumulates text and
+    // tool_use (partial_json) deltas internally and `finalMessage()` returns the
+    // exact same assembled Message shape `messages.create()` would, so the usage
+    // + extraction below is unchanged. We bump the idle timer on every stream
+    // event; a healthily-progressing response never trips it. A mid-stream
+    // failure (stall or network drop) discards the partial and retries the whole
+    // prompt, up to the retry budget.
     this.debug(`[AnthropicExecutor] Final messages payload:\n${JSON.stringify({ system: params.system, messages: params.messages }, null, 2)}`);
-    const response = await this.client.messages.create(params);
+    const response = await streamWithRetry(
+      async (guard) => {
+        const stream = this.client.messages.stream(params, { signal: guard.signal });
+        stream.on('streamEvent', () => guard.bump());
+        return await stream.finalMessage();
+      },
+      {
+        externalSignal: options.signal,
+        isRetryable: (err) => this.isRetryableError(err),
+        log: (m) => this.log(m),
+      }
+    );
 
     // Format response to match expected structure
     const usageTyped = response.usage as typeof response.usage & {
