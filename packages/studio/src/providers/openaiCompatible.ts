@@ -265,11 +265,18 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
     }));
   }
 
-  /** Provider-specific params from model config metadata (excludes non-API keys). */
+  /** Provider-call params from the model config. Sourced from the top-level
+   *  V2ModelConfig fields (temperature/maxTokens — what the console strategy
+   *  editor writes) AND `metadata` (advanced/raw OpenAI params like top_p). Every
+   *  adapter historically read params from metadata only, so without the
+   *  top-level fields the console's temperature field silently did nothing.
+   *  metadata wins on a key collision (explicit per-call override). */
   #extractProviderParams(): Record<string, any> {
-    const metadata = (this.primaryModelConfig as any).metadata || {};
-    // Strip keys that are adapter config, not model-call params.
-    const { displayName, baseURL, cacheMode, quantization, ...providerParams } = metadata;
-    return providerParams;
+    const cfg = this.primaryModelConfig as any;
+    const { displayName, baseURL, cacheMode, quantization, ...metadataParams } = cfg.metadata || {};
+    const params: Record<string, any> = {};
+    if (cfg.temperature != null) params.temperature = cfg.temperature;
+    if (cfg.maxTokens != null) params.max_tokens = cfg.maxTokens;
+    return { ...params, ...metadataParams };
   }
 }
