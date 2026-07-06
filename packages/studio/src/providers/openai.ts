@@ -158,6 +158,26 @@ export default class OpenAIExecutor extends BaseExecutor {
         };
       }
 
+      // An assistant message that made tool calls must carry them back in
+      // OpenAI wire format when history is replayed, or the following tool
+      // result 400s ("tool_call_id does not match any tool call in the
+      // preceding assistant messages"). Canonical ToolCall { id, name, args } →
+      // { id, type:'function', function:{ name, arguments: JSON-string } }.
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        return {
+          role: 'assistant',
+          content: msg.content ?? '',
+          tool_calls: msg.tool_calls.map(tc => ({
+            id: tc.id,
+            type: 'function',
+            function: {
+              name: tc.name,
+              arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
+            },
+          })),
+        };
+      }
+
       // Handle regular messages
       return {
         role: msg.role,

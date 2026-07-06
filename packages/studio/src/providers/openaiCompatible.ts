@@ -210,6 +210,27 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
       if (msg.role === 'tool') {
         return { role: 'tool', tool_call_id: msg.tool_call_id, content: msg.content };
       }
+      // An assistant message that made tool calls MUST carry them back in
+      // OpenAI wire format when the history is replayed on the next turn —
+      // otherwise the following `tool` result has no matching tool call and the
+      // provider 400s ("tool_call_id ... does not match any tool call in the
+      // preceding assistant messages"), breaking every multi-turn tool loop.
+      // Our canonical ToolCall is { id, name, args:object }; OpenAI wants
+      // { id, type:'function', function:{ name, arguments: JSON-string } }.
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        return {
+          role: 'assistant',
+          content: msg.content ?? '',
+          tool_calls: msg.tool_calls.map(tc => ({
+            id: tc.id,
+            type: 'function',
+            function: {
+              name: tc.name,
+              arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
+            },
+          })),
+        };
+      }
       return { role: msg.role, content: msg.content };
     });
   }
