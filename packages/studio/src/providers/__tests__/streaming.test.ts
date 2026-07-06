@@ -227,6 +227,27 @@ describe('consumeOpenAIStream', () => {
     expect(() => JSON.parse(tc[0].function.arguments)).not.toThrow();
   });
 
+  it('accumulates delta.reasoning_content into a separate buffer, undefined when absent', async () => {
+    const withReasoning = await consumeOpenAIStream(
+      gen([
+        { choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'step ' } }] },
+        { choices: [{ index: 0, delta: { reasoning_content: 'by step' } }] },
+        { choices: [], usage: { prompt_tokens: 4, completion_tokens: 9 } },
+      ]),
+      () => {}
+    );
+    // content empty (no content deltas), reasoning accumulated separately
+    expect(withReasoning.choices[0].message.content).toBe('');
+    expect(withReasoning.choices[0].message.reasoning_content).toBe('step by step');
+
+    // A stream that never sends reasoning_content leaves the field undefined.
+    const withoutReasoning = await consumeOpenAIStream(
+      gen([{ choices: [{ index: 0, delta: { role: 'assistant', content: 'hi' } }] }]),
+      () => {}
+    );
+    expect(withoutReasoning.choices[0].message.reasoning_content).toBeUndefined();
+  });
+
   it('keeps multiple parallel tool calls separate by index, in order', async () => {
     const result = await consumeOpenAIStream(
       gen([

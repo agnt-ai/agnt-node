@@ -211,6 +211,12 @@ export interface OpenAICompletionLike {
     message: {
       role: string;
       content: string | null;
+      /** Reasoning models (Qwen, DeepSeek-R1) served over the OpenAI-compatible
+       *  wire stream their chain-of-thought — and sometimes their ENTIRE final
+       *  answer — here instead of in `content`. Preserved separately so the
+       *  executor can fall back to it when `content` comes back empty on a
+       *  productive `stop` turn. Undefined for providers that never emit it. */
+      reasoning_content?: string | null;
       tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
     };
   }>;
@@ -234,6 +240,12 @@ export async function consumeOpenAIStream(
   let role = 'assistant';
   let content = '';
   let sawContent = false;
+  // Reasoning models stream chain-of-thought (and sometimes the whole answer)
+  // in `delta.reasoning_content`. Accumulate it separately; the executor decides
+  // whether to promote it to content. Guarded so providers that never send the
+  // field cost nothing. See openaiCompatible.ts #resolveReasoningFallback.
+  let reasoning = '';
+  let sawReasoning = false;
   let usage: any = undefined;
   const byIndex = new Map<number, { id: string; name: string; args: string }>();
 
@@ -246,6 +258,10 @@ export async function consumeOpenAIStream(
       if (typeof delta.content === 'string') {
         content += delta.content;
         sawContent = true;
+      }
+      if (typeof delta.reasoning_content === 'string') {
+        reasoning += delta.reasoning_content;
+        sawReasoning = true;
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const tc of delta.tool_calls) {
@@ -275,7 +291,16 @@ export async function consumeOpenAIStream(
 
   return {
     // Mirror the non-streamed shape: content is null when the turn is tool-only.
-    choices: [{ message: { role, content: sawContent ? content : (tool_calls ? null : ''), tool_calls } }],
+    // reasoning_content is carried through (undefined when never seen) so the
+    // executor's fallback runs identically for streamed and buffered responses.
+    choices: [{
+      message: {
+        role,
+        content: sawContent ? content : (tool_calls ? null : ''),
+        reasoning_content: sawReasoning ? reasoning : undefined,
+        tool_calls,
+      },
+    }],
     usage,
   };
 }
