@@ -314,3 +314,42 @@ describe('OpenAICompatibleExecutor — config-driven baseURL + credentials', () 
     expect(sent.quantization).toBeUndefined();
   });
 });
+
+describe('OpenAICompatibleExecutor — model params (temperature/maxTokens)', () => {
+  function configWith(modelFields: Record<string, any>): BaseExecutorConfig {
+    return {
+      manifest: {
+        $schema: 'https://agnt.ai/schemas/manifest/v2.json',
+        kind: 'PromptManifest',
+        apiVersion: 'v2',
+        metadata: { name: 'test', title: 'Test', description: '' },
+        spec: {
+          routingStrategy: 'fallback', enableToolCalls: false,
+          variables: [], files: [], tools: [],
+          models: [{ provider: 'together', model: 'moonshotai/Kimi-K2', ...modelFields }],
+          dependencies: [],
+        },
+      } as PromptManifestV2,
+      credentials: { together: { apiKey: 'k' } },
+      logLevel: 'silent',
+    } as BaseExecutorConfig;
+  }
+
+  it('passes top-level temperature + maxTokens to the API (what the console strategy editor writes)', async () => {
+    mockStream({ choices: [{ message: { role: 'assistant', content: 'x' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    const ex = new OpenAICompatibleExecutor(configWith({ temperature: 0.6, maxTokens: 16384 }));
+    await ex.invoke([{ role: 'user', content: 'hi' }]);
+    const sent = openaiCreate.mock.calls[0][0];
+    expect(sent.temperature).toBe(0.6);
+    expect(sent.max_tokens).toBe(16384);
+  });
+
+  it('metadata overrides the top-level field on a key collision, and metadata-only params still flow', async () => {
+    mockStream({ choices: [{ message: { role: 'assistant', content: 'x' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    const ex = new OpenAICompatibleExecutor(configWith({ temperature: 0.6, metadata: { temperature: 0.2, top_p: 0.8 } }));
+    await ex.invoke([{ role: 'user', content: 'hi' }]);
+    const sent = openaiCreate.mock.calls[0][0];
+    expect(sent.temperature).toBe(0.2); // metadata wins
+    expect(sent.top_p).toBe(0.8);       // metadata-only param still flows
+  });
+});
