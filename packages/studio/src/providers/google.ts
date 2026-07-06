@@ -199,9 +199,24 @@ export default class GoogleExecutor extends BaseExecutor {
         // For Google, tool_call_id IS the function name (we set id = name in extractToolCalls)
         const toolName = msg.tool_call_id || msg.name || 'unknown';
 
-        // Gemini requires functionResponse.response to be an object, not an array.
-        const parsed = JSON.parse(msg.content as string);
-        const response = Array.isArray(parsed) ? { result: parsed } : (parsed ?? {});
+        // Gemini requires functionResponse.response to be an OBJECT (not an
+        // array, primitive, or bare string). The tool result is usually a
+        // JSON-stringified value, but not guaranteed valid single JSON — a tool
+        // can return plain text, concatenated chunks, or a truncated payload.
+        // A bare JSON.parse there throws and kills the whole run ("Unexpected
+        // non-whitespace character after JSON…"), so parse defensively and wrap
+        // whatever we get into an object.
+        let response: Record<string, any>;
+        try {
+          const parsed = JSON.parse(msg.content as string);
+          if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            response = parsed;
+          } else {
+            response = { result: parsed }; // array or primitive
+          }
+        } catch {
+          response = { result: msg.content }; // not valid JSON — pass the raw text through
+        }
 
         contents.push({
           role: 'function',

@@ -190,6 +190,33 @@ describe('GoogleExecutor streaming', () => {
     expect(res.usage.output_tokens).toBe(12);
   });
 
+  it('does not crash on a tool result that is not valid single JSON (wraps it instead)', async () => {
+    // Real failure: a tool returned non-JSON / concatenated chunks, and a bare
+    // JSON.parse threw ("Unexpected non-whitespace character after JSON…"),
+    // killing the whole run. Must degrade to wrapping the raw content.
+    googleGenerateContentStream.mockResolvedValue(
+      googleStreamResult({
+        candidates: [{ content: { parts: [{ text: 'ok' }] } }],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+      })
+    );
+    const ex = new GoogleExecutor(makeConfig('google', 'gemini-2.0-flash', { google: { apiKey: 'k' } }));
+
+    const badToolContent = '{"a":1}\n{"b":2}'; // two concatenated objects → JSON.parse throws at line 3
+    const res = await ex.invoke([
+      { role: 'user', content: 'go' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'lookup', name: 'lookup', args: {} }] } as any,
+      { role: 'tool', tool_call_id: 'lookup', content: badToolContent },
+    ]);
+
+    expect(res.message.content).toBe('ok'); // run completed, no throw
+    // The functionResponse.response is still an object (Gemini requires it),
+    // wrapping the raw content rather than crashing.
+    const contents = googleGenerateContentStream.mock.calls[0][0].contents;
+    const fnResp = contents.flatMap((c: any) => c.parts).find((p: any) => p.functionResponse);
+    expect(fnResp.functionResponse.response).toEqual({ result: badToolContent });
+  });
+
   it('preserves thoughtSignature in rawParts from the raw stream chunks (aggregate strips it)', async () => {
     // The SDK's response aggregator drops thought/thoughtSignature, so the
     // aggregated candidate parts (what `result.response` returns) have none.
