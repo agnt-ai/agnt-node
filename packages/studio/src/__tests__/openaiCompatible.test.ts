@@ -239,6 +239,23 @@ describe('OpenAICompatibleExecutor — streaming', () => {
     expect(res.message.tool_calls).toEqual([{ id: 'c1', name: 'ping', args: {} }]);
   });
 
+  it('does not crash on malformed/truncated tool-call arguments (degrades to {})', async () => {
+    // Open models occasionally emit invalid JSON in tool args; a bare
+    // JSON.parse would throw and kill the run. Must degrade to {} instead.
+    async function* badArgsStream() {
+      yield { choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'c2', type: 'function', function: { name: 'search', arguments: '{"q":"pizza' } }] } }] };
+      yield { choices: [], usage: { prompt_tokens: 3, completion_tokens: 1 } };
+    }
+    openaiCreate.mockImplementation(async () => badArgsStream());
+    const ex = new OpenAICompatibleExecutor(makeConfig('together', 'zai-org/GLM-5.2', { together: { apiKey: 'k' } }));
+    const res = await ex.invoke(
+      [{ role: 'user', content: 'hi' }],
+      { tools: [{ name: 'search', description: 'd', parameters: { type: 'object', properties: {} } }] as any },
+    );
+
+    expect(res.message.tool_calls).toEqual([{ id: 'c2', name: 'search', args: {} }]);
+  });
+
   it('does not crash when the host omits usage on the final chunk (yields 0s, not a throw)', async () => {
     // Some OpenAI-compatible hosts ignore stream_options.include_usage. Must not
     // dereference response.usage!.  LIVE-VERIFY Together actually honors it —
@@ -351,5 +368,33 @@ describe('OpenAICompatibleExecutor — model params (temperature/maxTokens)', ()
     const sent = openaiCreate.mock.calls[0][0];
     expect(sent.temperature).toBe(0.2); // metadata wins
     expect(sent.top_p).toBe(0.8);       // metadata-only param still flows
+  });
+});
+
+describe('OpenAICompatibleExecutor — tool-call replay (multi-turn history)', () => {
+  it('renders an assistant message’s tool_calls in OpenAI wire format so the following tool result matches', async () => {
+    mockStream({ choices: [{ message: { role: 'assistant', content: 'done' } }], usage: { prompt_tokens: 5, completion_tokens: 1 } });
+    const ex = new OpenAICompatibleExecutor(makeConfig('together', 'zai-org/GLM-5.2', { together: { apiKey: 'k' } }));
+
+    // History as BaseExecutor holds it after turn 1: assistant made a tool call
+    // (canonical { id, name, args }), then the tool result came back.
+    await ex.invoke([
+      { role: 'user', content: 'find pizza' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call_019f', name: 'search_memories', args: { queries: ['pizza'] } }] } as any,
+      { role: 'tool', tool_call_id: 'call_019f', content: 'no results' },
+    ]);
+
+    const sent = openaiCreate.mock.calls[0][0].messages;
+    const assistant = sent.find((m: any) => m.role === 'assistant');
+    const toolMsg = sent.find((m: any) => m.role === 'tool');
+
+    // The assistant message carries tool_calls in OpenAI wire shape...
+    expect(assistant.tool_calls).toEqual([
+      { id: 'call_019f', type: 'function', function: { name: 'search_memories', arguments: '{"queries":["pizza"]}' } },
+    ]);
+    // ...and its id matches the following tool result's tool_call_id (the thing
+    // Together 400'd on when tool_calls were dropped).
+    expect(toolMsg.tool_call_id).toBe('call_019f');
+    expect(assistant.tool_calls[0].id).toBe(toolMsg.tool_call_id);
   });
 });

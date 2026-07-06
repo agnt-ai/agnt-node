@@ -158,6 +158,26 @@ export default class OpenAIExecutor extends BaseExecutor {
         };
       }
 
+      // An assistant message that made tool calls must carry them back in
+      // OpenAI wire format when history is replayed, or the following tool
+      // result 400s ("tool_call_id does not match any tool call in the
+      // preceding assistant messages"). Canonical ToolCall { id, name, args } →
+      // { id, type:'function', function:{ name, arguments: JSON-string } }.
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        return {
+          role: 'assistant',
+          content: msg.content ?? '',
+          tool_calls: msg.tool_calls.map(tc => ({
+            id: tc.id,
+            type: 'function',
+            function: {
+              name: tc.name,
+              arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
+            },
+          })),
+        };
+      }
+
       // Handle regular messages
       return {
         role: msg.role,
@@ -256,11 +276,17 @@ export default class OpenAIExecutor extends BaseExecutor {
       return [];
     }
 
-    return toolCalls.map(tc => ({
-      id: tc.id,
-      name: tc.function.name,
-      args: JSON.parse(tc.function.arguments)
-    }));
+    // Guard the args parse: a model that emits malformed/truncated JSON in
+    // tool arguments would otherwise throw here and kill the whole run.
+    return toolCalls.map(tc => {
+      let args: Record<string, any> = {};
+      try {
+        args = JSON.parse(tc.function.arguments || '{}');
+      } catch {
+        this.log(`[OpenAIExecutor] tool "${tc.function?.name}" returned unparseable arguments; using {}:`, tc.function?.arguments);
+      }
+      return { id: tc.id, name: tc.function.name, args };
+    });
   }
 
   /**
