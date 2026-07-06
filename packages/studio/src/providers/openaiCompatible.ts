@@ -185,11 +185,14 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
     const promptTokens = response.usage?.prompt_tokens ?? 0;
     const completionTokens = response.usage?.completion_tokens ?? 0;
 
+    const toolCalls = this.#extractToolCalls(message.tool_calls);
+    const content = this.#resolveReasoningFallback(message, toolCalls, completionTokens);
+
     return {
       message: {
         role: message.role as Message['role'],
-        content: message.content || '',
-        tool_calls: this.#extractToolCalls(message.tool_calls),
+        content,
+        tool_calls: toolCalls,
       },
       usage: {
         input_tokens: Math.max(0, promptTokens - cachedTokens),
@@ -198,6 +201,91 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
         cache_creation_input_tokens: 0,
       },
     };
+  }
+
+  /**
+   * Resolve the assistant message's text content, recovering answers that
+   * reasoning models (Qwen, DeepSeek-R1) misplace when served over the
+   * OpenAI-compatible wire.
+   *
+   * These models stream their chain-of-thought in `reasoning_content` and are
+   * SUPPOSED to put the final answer in `content` — but on `finish_reason:stop`
+   * turns some hosts (observed live on Together/Qwen-9B: 410 and 448 output
+   * tokens with `content:null`) leave `content` null and the whole answer sits
+   * in `reasoning_content`, which our mapper never read → the subtask returned
+   * an empty result. Others inline the thinking as a `<think>…</think>` block
+   * prefixing the real answer.
+   *
+   * Rules:
+   *   - Tool-call turn: empty content is NORMAL. Return it as-is and NEVER
+   *     promote reasoning — the tool call IS the productive output.
+   *   - Strip a leading `<think>…</think>` block. If real answer text remains,
+   *     that's the content. If only the think block was there, fall through.
+   *   - If content is empty/whitespace, fall back to `reasoning_content`.
+   *   - Guardrail: if we STILL have no content, there are no tool calls, and the
+   *     turn was productive (output_tokens > 0), the response is malformed — a
+   *     productive turn that yielded nothing usable. Throw a retryable error so
+   *     it rides the existing streamWithRetry + model-fallback machinery
+   *     (bounded by maxRetries and the fallback list — never an unbounded loop)
+   *     instead of silently returning an empty answer.
+   */
+  #resolveReasoningFallback(
+    message: { content?: string | null; reasoning_content?: string | null },
+    toolCalls: any[],
+    outputTokens: number
+  ): string {
+    const hasToolCalls = toolCalls.length > 0;
+    const rawContent = message.content ?? '';
+    const reasoning = (message.reasoning_content ?? '').trim();
+
+    // Tool-call turn: empty content is expected. Return content verbatim and do
+    // not let reasoning pollute it.
+    if (hasToolCalls) return rawContent || '';
+
+    // Strip a leading <think>…</think> block; if a real answer follows, use it.
+    const stripped = this.#stripThinkBlock(rawContent);
+    if (stripped.trim()) return stripped;
+
+    // Content was empty (or think-only). Recover the answer from reasoning_content.
+    if (reasoning) {
+      this.log(`[OpenAICompatibleExecutor:${this.providerName}] content empty on stop turn — recovered answer from reasoning_content (${reasoning.length} chars)`);
+      return reasoning;
+    }
+
+    // Nothing usable. A productive turn (tokens billed) that yielded no content
+    // and no tool call is a malformed response — retry rather than return empty.
+    if (outputTokens > 0) {
+      throw this.#malformedEmptyResponseError(outputTokens);
+    }
+
+    // Genuinely empty turn (0 output tokens): nothing to recover, nothing wrong.
+    return '';
+  }
+
+  /** Strip a leading `<think>…</think>` reasoning block from inline content.
+   *  Only removes a block anchored at the start (after optional whitespace) so a
+   *  legitimate `<think>` appearing inside a real answer is left untouched. An
+   *  unterminated `<think>` with no closing tag is treated as all-reasoning. */
+  #stripThinkBlock(text: string): string {
+    if (!text) return '';
+    const closed = text.replace(/^\s*<think>[\s\S]*?<\/think>/i, '');
+    if (closed !== text) return closed.trim();
+    // Unterminated opener: the whole thing is reasoning, no answer to keep.
+    if (/^\s*<think>/i.test(text)) return '';
+    return text;
+  }
+
+  /** A retryable error for a productive-but-empty response. Given status 502 so
+   *  BaseExecutor.isRetryableError classifies it as a transient upstream fault —
+   *  which routes it through both the in-stream retry (streamWithRetry) and the
+   *  cross-model fallback, exactly like a real 5xx. Bounded, never a loop. */
+  #malformedEmptyResponseError(outputTokens: number): Error {
+    const err: any = new Error(
+      `[OpenAICompatibleExecutor:${this.providerName}] malformed response: ${outputTokens} output tokens but empty content, no reasoning_content, and no tool_calls`
+    );
+    err.status = 502;
+    err.isMalformedEmptyResponse = true;
+    return err;
   }
 
   hasToolCalls(message: Message): boolean {
@@ -276,14 +364,21 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
     return 'auto';
   }
 
-  /** Extract tool calls from an OpenAI-compatible response. */
+  /** Extract tool calls from an OpenAI-compatible response. Open models
+   *  sometimes emit malformed or truncated JSON in the arguments; a bare
+   *  JSON.parse there throws and kills the whole run. Degrade to empty args so
+   *  the tool loop continues (and the model can recover) instead of crashing. */
   #extractToolCalls(toolCalls: any[] | undefined): any[] {
     if (!toolCalls || toolCalls.length === 0) return [];
-    return toolCalls.map(tc => ({
-      id: tc.id,
-      name: tc.function.name,
-      args: JSON.parse(tc.function.arguments),
-    }));
+    return toolCalls.map(tc => {
+      let args: Record<string, any> = {};
+      try {
+        args = JSON.parse(tc.function.arguments || '{}');
+      } catch {
+        this.log(`[OpenAICompatibleExecutor:${this.providerName}] tool "${tc.function?.name}" returned unparseable arguments; using {}:`, tc.function?.arguments);
+      }
+      return { id: tc.id, name: tc.function.name, args };
+    });
   }
 
   /** Provider-call params from the model config. Sourced from the top-level

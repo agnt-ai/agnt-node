@@ -239,6 +239,23 @@ describe('OpenAICompatibleExecutor — streaming', () => {
     expect(res.message.tool_calls).toEqual([{ id: 'c1', name: 'ping', args: {} }]);
   });
 
+  it('does not crash on malformed/truncated tool-call arguments (degrades to {})', async () => {
+    // Open models occasionally emit invalid JSON in tool args; a bare
+    // JSON.parse would throw and kill the run. Must degrade to {} instead.
+    async function* badArgsStream() {
+      yield { choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'c2', type: 'function', function: { name: 'search', arguments: '{"q":"pizza' } }] } }] };
+      yield { choices: [], usage: { prompt_tokens: 3, completion_tokens: 1 } };
+    }
+    openaiCreate.mockImplementation(async () => badArgsStream());
+    const ex = new OpenAICompatibleExecutor(makeConfig('together', 'zai-org/GLM-5.2', { together: { apiKey: 'k' } }));
+    const res = await ex.invoke(
+      [{ role: 'user', content: 'hi' }],
+      { tools: [{ name: 'search', description: 'd', parameters: { type: 'object', properties: {} } }] as any },
+    );
+
+    expect(res.message.tool_calls).toEqual([{ id: 'c2', name: 'search', args: {} }]);
+  });
+
   it('does not crash when the host omits usage on the final chunk (yields 0s, not a throw)', async () => {
     // Some OpenAI-compatible hosts ignore stream_options.include_usage. Must not
     // dereference response.usage!.  LIVE-VERIFY Together actually honors it —

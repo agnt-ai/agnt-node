@@ -276,11 +276,17 @@ export default class OpenAIExecutor extends BaseExecutor {
       return [];
     }
 
-    return toolCalls.map(tc => ({
-      id: tc.id,
-      name: tc.function.name,
-      args: JSON.parse(tc.function.arguments)
-    }));
+    // Guard the args parse: a model that emits malformed/truncated JSON in
+    // tool arguments would otherwise throw here and kill the whole run.
+    return toolCalls.map(tc => {
+      let args: Record<string, any> = {};
+      try {
+        args = JSON.parse(tc.function.arguments || '{}');
+      } catch {
+        this.log(`[OpenAIExecutor] tool "${tc.function?.name}" returned unparseable arguments; using {}:`, tc.function?.arguments);
+      }
+      return { id: tc.id, name: tc.function.name, args };
+    });
   }
 
   /**
