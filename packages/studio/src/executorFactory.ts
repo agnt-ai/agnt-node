@@ -7,6 +7,7 @@
  *   - openai            → OpenAIExecutor
  *   - google / gemini   → GoogleExecutor
  *   - bedrock           → BedrockExecutor
+ *   - azureFoundry      → AzureFoundryExecutor
  *   - openai-compatible → OpenAICompatibleExecutor
  *       (together, fireworks, deepinfra, deepseek, and any host that speaks the
  *        OpenAI wire format — differences live in config, not code, so a new
@@ -16,6 +17,7 @@
 import AnthropicExecutor from './providers/anthropic.js';
 import OpenAIExecutor from './providers/openai.js';
 import BedrockExecutor from './providers/bedrock.js';
+import AzureFoundryExecutor from './providers/azureFoundry.js';
 import OpenAICompatibleExecutor, {
   OPENAI_COMPATIBLE_PROVIDERS,
 } from './providers/openaiCompatible.js';
@@ -56,6 +58,10 @@ export async function createExecutor(config: BaseExecutorConfig): Promise<BaseEx
     case 'bedrock':
       log(`[executorFactory] Creating Bedrock executor: ${primaryModel.model}`);
       return new BedrockExecutor(configWithFactory);
+
+    case 'azurefoundry':
+      log(`[executorFactory] Creating Azure Foundry executor: ${primaryModel.model}`);
+      return new AzureFoundryExecutor(configWithFactory);
 
     case 'google':
     case 'gemini':
