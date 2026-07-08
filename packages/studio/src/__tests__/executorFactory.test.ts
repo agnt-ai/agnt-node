@@ -4,6 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 vi.mock('../providers/anthropic.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'anthropic' })) }));
 vi.mock('../providers/openai.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'openai' })) }));
 vi.mock('../providers/bedrock.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'bedrock' })) }));
+vi.mock('../providers/azureFoundry.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'azureFoundry' })) }));
 vi.mock('../providers/google.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'google' })) }));
 // DeepSeek / Together / Fireworks / DeepInfra all share the OpenAI-compatible
 // executor. Mock it AND re-export the provider set the factory imports.
@@ -17,6 +18,7 @@ import { createExecutor } from '../executorFactory.js';
 import AnthropicExecutor from '../providers/anthropic.js';
 import OpenAIExecutor from '../providers/openai.js';
 import BedrockExecutor from '../providers/bedrock.js';
+import AzureFoundryExecutor from '../providers/azureFoundry.js';
 import GoogleExecutor from '../providers/google.js';
 import OpenAICompatibleExecutor from '../providers/openaiCompatible.js';
 
@@ -66,6 +68,16 @@ describe('createExecutor', () => {
   it('creates Bedrock executor for provider=bedrock', async () => {
     await createExecutor({ manifest: makeManifest('bedrock'), credentials: {} });
     expect(BedrockExecutor).toHaveBeenCalled();
+  });
+
+  it('creates Azure Foundry executor for provider=azureFoundry', async () => {
+    await createExecutor({ manifest: makeManifest('azureFoundry'), credentials: {} });
+    expect(AzureFoundryExecutor).toHaveBeenCalled();
+  });
+
+  it('creates Azure Foundry executor (case-insensitive)', async () => {
+    await createExecutor({ manifest: makeManifest('AzureFoundry'), credentials: {} });
+    expect(AzureFoundryExecutor).toHaveBeenCalled();
   });
 
   it('creates OpenAI-compatible executor for provider=deepseek', async () => {

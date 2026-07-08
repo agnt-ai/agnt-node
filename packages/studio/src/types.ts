@@ -57,6 +57,15 @@ export interface ProviderCredentials {
     accessKeyId?: string;
     secretAccessKey?: string;
   };
+  // Azure AI Foundry's unified Model Inference API — OpenAI wire-compatible,
+  // but auth is an `api-key` header + `api-version` query param scoped to a
+  // per-resource endpoint, not a bearer token against a shared base URL.
+  azureFoundry?: {
+    apiKey: string;
+    endpoint: string; // e.g. https://<resource>.services.ai.azure.com
+    apiVersion?: string;
+    dangerouslyAllowBrowser?: boolean;
+  };
   deepseek?: OpenAICompatibleCredentials;
   google?: {
     apiKey: string;
