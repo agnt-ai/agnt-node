@@ -809,6 +809,23 @@ export default class BaseExecutor {
    * Union types (`type: ["number","null"]`) are honored if they include the target.
    * Copy-on-write: the caller's args object is never mutated in place.
    *
+   * Envelope rescue (whole-args collapse, not a single field): models also
+   * frequently call a direct-schema tool by wrapping its ENTIRE argument set
+   * inside a single non-schema `params` key holding a JSON string — mimicking
+   * the shape of the generic `execute_tool({tool_name, params})` meta-tool —
+   * e.g. `create_task({ params: "{\"title\":\"...\"}" })` instead of
+   * `create_task({ title: "..." })`. Left alone, the handler sees none of its
+   * expected named fields and fails with a generic "title is required"-style
+   * error even though a title WAS supplied, just nested one level too deep —
+   * no actionable signal, so the model often repeats the same mistake. When
+   * args reduce to exactly one key named `params` holding a JSON-parseable
+   * string, AND the tool's own schema does not itself declare a `params`
+   * property (so a tool that legitimately has one is never misfired on), we
+   * parse that string and splat its properties in as the top-level args. A
+   * parse failure or non-object result falls through to normal validation —
+   * but we log a diagnostic first so a future failure is traceable instead of
+   * repeating the current generic error with no context.
+   *
    * Every tool call — system, custom, dispatch, and `execute_tool` itself — flows
    * through `handleToolCalls`, so this single point brings direct calls to parity
    * with what the meta-tool path already does.
@@ -820,13 +837,41 @@ export default class BaseExecutor {
     const properties = def?.function?.parameters?.properties;
     if (!properties || typeof properties !== 'object') return args;
 
-    let out: Record<string, any> | null = null; // copy-on-write — only allocated if we actually coerce
+    let workingArgs = args;
+    const argKeys = Object.keys(args);
+    if (
+      argKeys.length === 1 &&
+      argKeys[0] === 'params' &&
+      typeof args.params === 'string' &&
+      !('params' in (properties as Record<string, any>))
+    ) {
+      let parsed: any;
+      let parseError: any;
+      try {
+        parsed = JSON.parse(args.params);
+      } catch (err: any) {
+        parseError = err;
+      }
+      const isPlainObject = !parseError && parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
+      if (isPlainObject) {
+        workingArgs = parsed;
+      } else {
+        this.log(
+          `[BaseExecutor] Tool '${name}' was called with its entire argument set wrapped in a single ` +
+          `'params' JSON string (execute_tool-style) instead of its own top-level arguments, and the ` +
+          `value ${parseError ? `could not be JSON-parsed (${parseError.message})` : 'did not parse to an object'} ` +
+          '— falling through to normal validation.'
+        );
+      }
+    }
+
+    let out: Record<string, any> | null = workingArgs === args ? null : workingArgs; // copy-on-write — only allocated if we actually coerce or already rescued
     const coerce = (key: string, parsed: any) => {
-      if (!out) out = { ...args }; // never mutate the caller's args object in place
+      if (!out) out = { ...workingArgs }; // never mutate the caller's args object in place
       out[key] = parsed;
     };
 
-    for (const [key, value] of Object.entries(args)) {
+    for (const [key, value] of Object.entries(workingArgs)) {
       if (typeof value !== 'string') continue;
 
       const declaredType = (properties as Record<string, any>)[key]?.type;
@@ -875,7 +920,7 @@ export default class BaseExecutor {
       // any other / untyped param → never touched
     }
 
-    return out ?? args;
+    return out ?? workingArgs;
   }
 
   protected async handleToolCalls(toolCalls: ToolCall[]): Promise<ToolResult[]> {
