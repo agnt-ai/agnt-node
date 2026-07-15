@@ -492,6 +492,103 @@ describe('normalizeToolArgs — schema-aware arg coercion', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// normalizeToolArgs — wrapped `params` envelope rescue (execute_tool mimicry)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('normalizeToolArgs — wrapped params envelope rescue', () => {
+  function directCallManifest() {
+    return makeManifest({
+      spec: {
+        routingStrategy: 'fallback',
+        enableToolCalls: true,
+        variables: [],
+        files: [],
+        models: [{ provider: 'anthropic', model: 'claude-sonnet-4-5' }],
+        dependencies: [],
+        tools: [
+          {
+            name: 'create_task',
+            description: 'create a task',
+            parameters: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                notes: { type: 'string' },
+              },
+              required: ['title'],
+            },
+          },
+          {
+            // A tool that legitimately declares its own `params` property —
+            // the rescue must never misfire on this one.
+            name: 'legacy_params_tool',
+            description: 'takes a raw params blob on purpose',
+            parameters: {
+              type: 'object',
+              properties: {
+                params: { type: 'string' },
+              },
+            },
+          },
+        ],
+      },
+    } as any);
+  }
+
+  function ex() {
+    return new TestExecutor(makeConfig(directCallManifest()));
+  }
+
+  it('rescues a direct-call tool whose args collapsed to a wrapped params JSON string', () => {
+    const out = ex().testNormalizeToolArgs('create_task', {
+      params: '{"title":"Buy milk","notes":"2%"}',
+    });
+    expect(out).toEqual({ title: 'Buy milk', notes: '2%' });
+  });
+
+  it('leaves a tool that legitimately declares its own params property unaffected', () => {
+    const out = ex().testNormalizeToolArgs('legacy_params_tool', { params: '{"title":"x"}' });
+    expect(out).toEqual({ params: '{"title":"x"}' });
+  });
+
+  it('falls through to normal args when the wrapped params string is not valid JSON', () => {
+    const log = vi.fn();
+    const executor = new TestExecutor(makeConfig(directCallManifest(), { log }));
+    const out = executor.testNormalizeToolArgs('create_task', { params: 'not valid json{' });
+    expect(out).toEqual({ params: 'not valid json{' });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Tool 'create_task'"));
+  });
+
+  it('falls through when the parsed params JSON is not a plain object (e.g. an array)', () => {
+    const log = vi.fn();
+    const executor = new TestExecutor(makeConfig(directCallManifest(), { log }));
+    const out = executor.testNormalizeToolArgs('create_task', { params: '[1,2,3]' });
+    expect(out).toEqual({ params: '[1,2,3]' });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Tool 'create_task'"));
+  });
+
+  it('does not rescue when there is more than one top-level key', () => {
+    const out = ex().testNormalizeToolArgs('create_task', {
+      params: '{"title":"Buy milk"}',
+      notes: 'extra',
+    });
+    expect(out).toEqual({ params: '{"title":"Buy milk"}', notes: 'extra' });
+  });
+
+  it('rescues through handleToolCalls end-to-end so the handler receives named args', async () => {
+    let received: any;
+    const router = {
+      create_task: { execute: async (args: any) => { received = args; return { completed: true }; } },
+    };
+    const executor = new TestExecutor(makeConfig(directCallManifest(), { toolRouter: router }));
+    await executor.testHandleToolCalls([
+      { id: 't1', name: 'create_task', args: { params: '{"title":"Buy milk"}' } },
+    ]);
+    expect(received).toEqual({ title: 'Buy milk' });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // isRetryableError — transient-fault classification for model fallback
 // ─────────────────────────────────────────────────────────────────────────────
 
