@@ -691,6 +691,50 @@ describe('invokeWithFallback — transient 529 behavior', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// invokeWithFallback — lone-surrogate guard (the prod incident root cause: a
+// half-emoji left by upstream truncation makes the JSON body invalid → a
+// non-retryable 400 from every provider → panic → poisoned retry task).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('invokeWithFallback — lone-surrogate payload guard', () => {
+  it('well-forms message content before it reaches invoke(), so the body is valid JSON', async () => {
+    const ex = new TestExecutor(makeConfig(makeManifest())) as any;
+    ex.invoke = vi.fn().mockResolvedValue({ message: { role: 'assistant', content: 'ok' }, usage: {} });
+
+    // A meeting title truncated mid-emoji: trailing lone high surrogate.
+    const poisoned = [{ role: 'user', content: 'move meeting \uD83D' }];
+    await ex.invokeWithFallback(poisoned, {});
+
+    const sentMessages = ex.invoke.mock.calls[0][0];
+    expect(sentMessages[0].content).toBe('move meeting �');
+    // The exact failure the incident hit: JSON.stringify of a lone surrogate
+    // yields text a strict parser rejects. After well-forming it round-trips.
+    expect(JSON.parse(JSON.stringify(sentMessages))).toEqual([{ role: 'user', content: 'move meeting �' }]);
+  });
+
+  it('well-forms tool definitions in options too', async () => {
+    const ex = new TestExecutor(makeConfig(makeManifest())) as any;
+    ex.invoke = vi.fn().mockResolvedValue({ message: { role: 'assistant', content: 'ok' }, usage: {} });
+
+    await ex.invokeWithFallback(
+      [{ role: 'user', content: 'hi' }],
+      { tools: [{ name: 'x', description: 'desc \uDE00 tail' }] },
+    );
+
+    const sentOptions = ex.invoke.mock.calls[0][1];
+    expect(sentOptions.tools[0].description).toBe('desc � tail');
+  });
+
+  it('leaves a clean payload untouched (valid emoji preserved)', async () => {
+    const ex = new TestExecutor(makeConfig(makeManifest())) as any;
+    ex.invoke = vi.fn().mockResolvedValue({ message: { role: 'assistant', content: 'ok' }, usage: {} });
+
+    await ex.invokeWithFallback([{ role: 'user', content: 'gm \u{1F600} team' }], {});
+    expect(ex.invoke.mock.calls[0][0][0].content).toBe('gm \u{1F600} team');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // invokeWithFallback — cross-provider hop (the prod incident: both Anthropic
 // models timed out and the configured openai/gpt tail was never reached)
 // ─────────────────────────────────────────────────────────────────────────────
