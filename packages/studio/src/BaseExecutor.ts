@@ -31,6 +31,7 @@ import { evaluateCondition } from './conditions.js';
 import { sendTrace } from './tracing.js';
 import { SYSTEM_TOOL_NAMES } from './systemTools.js';
 import { normalizeToolResult } from './openclawAdapter.js';
+import { deepWellForm } from './wellFormed.js';
 import { StreamAbortError } from './providers/streaming.js';
 import type { HookRegistry } from './hooks.js';
 
@@ -404,6 +405,17 @@ export default class BaseExecutor {
    * introduced here — flagging so it isn't mistaken for fixed.
    */
   protected async invokeWithFallback(messages: Message[], options: InvokeOptions): Promise<InvokeResult> {
+    // Well-form the outbound payload before it can reach any provider client.
+    // A single unpaired UTF-16 surrogate (half an emoji left by upstream string
+    // truncation) makes the JSON request body invalid, and every provider
+    // rejects it with a NON-RETRYABLE 400 — which defeats model fallback below,
+    // trips the crash path into panic-recovery, and re-poisons any retry task
+    // that rebuilds the same context. Doing it here, at the shared dispatch
+    // boundary, covers same- and cross-provider invokes in one place. Strings
+    // are almost always already well-formed, so this is a scan with no clone.
+    messages = deepWellForm(messages);
+    if (options.tools) options = { ...options, tools: deepWellForm(options.tools) };
+
     const orderedModels = [...this.manifest.spec.models].sort(
       (a, b) => (a.fallbackOrder ?? 0) - (b.fallbackOrder ?? 0)
     );
