@@ -57,6 +57,18 @@ export default class BaseExecutor {
   protected primaryModelConfig: V2ModelConfig & { name: string };
   protected provider: string;
   protected model: string;
+  /**
+   * Snapshot of the originally-selected primary model, captured ONCE at
+   * construction time (right after selectPrimaryModel()) and never mutated
+   * again. invokeWithFallback() resets primaryModelConfig/provider/model from
+   * this snapshot at the start of every turn — see invokeWithFallback() for
+   * why this must stay a fixed snapshot rather than be re-derived by calling
+   * selectPrimaryModel() again mid-run (that would re-roll a 'random'
+   * strategy or re-evaluate a 'conditional' strategy against variables that
+   * may have drifted since construction — the primary model for a given
+   * executor instance must stay fixed for that instance's lifetime).
+   */
+  protected initialPrimaryModelConfig: V2ModelConfig & { name: string };
   protected allToolDefs: ToolDefinition[];
   protected tracing?: TracingConfig;
   protected files?: Array<any>;
@@ -119,6 +131,8 @@ export default class BaseExecutor {
     this.primaryModelConfig = { ...primaryModel, name: primaryModel.model };
     this.provider = primaryModel.provider;
     this.model = primaryModel.model;
+    // Fixed for the lifetime of this executor instance — see field doc above.
+    this.initialPrimaryModelConfig = { ...this.primaryModelConfig };
 
     // Determine initialToolChoice
     const enableToolCalls = this.manifest.spec.enableToolCalls !== false;
@@ -415,6 +429,22 @@ export default class BaseExecutor {
     // are almost always already well-formed, so this is a scan with no clone.
     messages = deepWellForm(messages);
     if (options.tools) options = { ...options, tools: deepWellForm(options.tools) };
+
+    // Reset to the originally-selected primary model at the start of every
+    // turn. This executor instance is reused across a multi-turn tool loop —
+    // a PRIOR turn may have fallen back to a different provider/model and
+    // mutated primaryModelConfig/provider/model (see the crossProvider and
+    // same-provider branches below). Without this reset, the i === 0
+    // iteration below would call this.invoke() with `this` still pointed at
+    // whatever provider/model the previous turn's fallback landed on — e.g.
+    // an AnthropicExecutor (hardcoded to Anthropic's SDK) with this.model
+    // still set to "gpt-5.4" from a prior cross-provider fallback, producing
+    // a literal Anthropic request for a model it doesn't serve (404
+    // not_found_error). Every turn must start clean from the manifest's
+    // original primary, regardless of what the previous turn fell back to.
+    this.primaryModelConfig = { ...this.initialPrimaryModelConfig };
+    this.provider = this.initialPrimaryModelConfig.provider;
+    this.model = this.initialPrimaryModelConfig.model;
 
     const orderedModels = [...this.manifest.spec.models].sort(
       (a, b) => (a.fallbackOrder ?? 0) - (b.fallbackOrder ?? 0)
