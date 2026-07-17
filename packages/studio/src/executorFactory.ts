@@ -9,9 +9,10 @@
  *   - bedrock           → BedrockExecutor
  *   - azureFoundry      → AzureFoundryExecutor
  *   - openai-compatible → OpenAICompatibleExecutor
- *       (together, fireworks, deepinfra, deepseek, and any host that speaks the
- *        OpenAI wire format — differences live in config, not code, so a new
- *        one is an AiModel row + credentials entry with no factory change.)
+ *       (together, fireworks, deepinfra, deepseek, moonshot, and any host that
+ *        speaks the OpenAI wire format — differences live in config, not code,
+ *        so a new one is an AiModel row + credentials entry with no factory
+ *        change.)
  */
 
 import AnthropicExecutor from './providers/anthropic.js';

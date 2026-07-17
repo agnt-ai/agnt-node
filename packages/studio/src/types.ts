@@ -78,6 +78,7 @@ export interface ProviderCredentials {
   together?: OpenAICompatibleCredentials;
   fireworks?: OpenAICompatibleCredentials;
   deepinfra?: OpenAICompatibleCredentials;
+  moonshot?: OpenAICompatibleCredentials;
   // Permit additional OpenAI-compatible providers by name without a type change
   // (satisfies "new openai-compatible provider = config + credentials only").
   [provider: string]: any;

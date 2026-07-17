@@ -2,9 +2,10 @@
  * OpenAICompatibleExecutor — shared adapter for OpenAI-compatible providers
  *
  * One adapter for every provider that speaks the OpenAI Chat Completions wire
- * format: Together AI (Kimi / Qwen), Fireworks, DeepInfra, DeepSeek, and any
- * future open-model host. Per-provider differences — base URL, credentials,
- * model IDs, pricing, cache behavior — live in CONFIG, never in code:
+ * format: Together AI (Kimi / Qwen), Fireworks, DeepInfra, DeepSeek, Moonshot
+ * AI (Kimi direct), and any future open-model host. Per-provider differences
+ * — base URL, credentials, model IDs, pricing, cache behavior — live in
+ * CONFIG, never in code:
  *
  *   - baseURL:  resolved from OPENAI_COMPATIBLE_BASE_URLS[provider], overridable
  *               by credentials[provider].baseURL or model metadata.baseURL.
@@ -38,7 +39,30 @@ export const OPENAI_COMPATIBLE_BASE_URLS: Record<string, string> = {
   fireworks: 'https://api.fireworks.ai/inference/v1',
   deepinfra: 'https://api.deepinfra.com/v1/openai',
   deepseek:  'https://api.deepseek.com/v1',
+  // International endpoint. China-region accounts need api.moonshot.cn/v1 —
+  // override via credentials.moonshot.baseURL (see resolution order below).
+  moonshot:  'https://api.moonshot.ai/v1',
 };
+
+/**
+ * Kimi K3 (Moonshot AI) always runs internal reasoning and rejects the
+ * classic sampling params — the same constraint OpenAI enforces for its
+ * o-series/gpt-5.x reasoning family (see the identical
+ * REASONING_FAMILY_MODEL_PATTERNS / #applyReasoningFamilyParams pair in
+ * openai.ts, added after a real prod 400 there). Per Moonshot's own docs:
+ * temperature/top_p/n/presence_penalty/frequency_penalty are fixed and must
+ * be omitted, and output length is capped via `max_completion_tokens`, not
+ * the legacy `max_tokens`. Keyed by provider so a future non-reasoning
+ * Moonshot model doesn't get this treatment by accident.
+ */
+const REASONING_ONLY_MODEL_PATTERNS: Record<string, RegExp[]> = {
+  moonshot: [/^kimi-k3(-|$)/i],
+};
+
+function needsReasoningFamilyParams(providerName: string, model: string): boolean {
+  const patterns = REASONING_ONLY_MODEL_PATTERNS[providerName];
+  return patterns ? patterns.some(pattern => pattern.test(model || '')) : false;
+}
 
 /** Providers routed through this adapter. Keep in sync with executorFactory. */
 export const OPENAI_COMPATIBLE_PROVIDERS = new Set(Object.keys(OPENAI_COMPATIBLE_BASE_URLS));
@@ -107,6 +131,13 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
 
     // Pass through provider-specific params from model config (temperature, top_p, …).
     Object.assign(params, this.#extractProviderParams());
+
+    // Reasoning-only models (Kimi K3) reject legacy sampling params and want
+    // max_completion_tokens instead of max_tokens — strip/translate in place
+    // before the request goes out. See #applyReasoningFamilyParams below.
+    if (needsReasoningFamilyParams(this.providerName, this.model)) {
+      this.#applyReasoningFamilyParams(params);
+    }
 
     if (options.tools && options.tools.length > 0) {
       params.tools = options.tools.map(t => this.#formatTool(t));
@@ -394,5 +425,27 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
     if (cfg.temperature != null) params.temperature = cfg.temperature;
     if (cfg.maxTokens != null) params.max_tokens = cfg.maxTokens;
     return { ...params, ...metadataParams };
+  }
+
+  /** Normalize outgoing params for reasoning-only models (Kimi K3). Mutates
+   *  `params` in place. See REASONING_ONLY_MODEL_PATTERNS above for why. */
+  #applyReasoningFamilyParams(params: Record<string, any>): void {
+    if ('max_tokens' in params) {
+      params.max_completion_tokens = params.max_tokens;
+      delete params.max_tokens;
+    }
+
+    for (const legacySamplingParam of [
+      'temperature',
+      'top_p',
+      'frequency_penalty',
+      'presence_penalty',
+      'logit_bias',
+      'n',
+      'logprobs',
+      'top_logprobs',
+    ]) {
+      delete params[legacySamplingParam];
+    }
   }
 }
