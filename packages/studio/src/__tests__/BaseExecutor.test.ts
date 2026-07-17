@@ -841,3 +841,119 @@ describe('invokeWithFallback — cross-provider fallback', () => {
     expect(ex.invoke).toHaveBeenCalledTimes(1); // openai hop skipped, not delegated
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// invokeWithFallback — multi-turn reuse: a turn's cross-provider fallback must
+// not leak into the NEXT turn on the same executor instance (prod incident:
+// ~10 occurrences over a 1.5hr window on 2026-07-17 — an AnthropicExecutor
+// left with this.model still set to the prior turn's "gpt-5.4" fallback,
+// producing a literal Anthropic request for a model Anthropic doesn't serve →
+// 404 not_found_error).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("invokeWithFallback — resets to the original primary at the start of every turn", () => {
+  it("does not leak a prior turn's cross-provider fallback identity into the next turn", async () => {
+    // The executor instance is reused across every turn of a multi-turn tool
+    // loop (see runToolLoop). Turn 1 falls back cross-provider (anthropic →
+    // openai) and succeeds; provider/model/primaryModelConfig are mutated onto
+    // `this` for trace/cost attribution (intentional — see the crossProvider
+    // branch above). Turn 2 must start from the manifest's original primary,
+    // not that leftover identity.
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'claude-sonnet-4-6', fallbackOrder: 0 },
+        { provider: 'openai',    model: 'gpt-5.4',           fallbackOrder: 1 },
+      ] },
+    });
+
+    const subInvoke = vi.fn().mockResolvedValue({
+      message: { role: 'assistant', content: 'from gpt' }, usage: {},
+    });
+    const executorFactory = vi.fn().mockResolvedValue({ invoke: subInvoke });
+
+    const ex = new TestExecutor(makeConfig(manifest, { executorFactory })) as any;
+
+    // Capture this.model/this.provider at the moment invoke() is actually
+    // called — this is the exact state a real AnthropicExecutor would use to
+    // build its outbound request.
+    const capturedModel: string[] = [];
+    const capturedProvider: string[] = [];
+    let call = 0;
+    ex.invoke = vi.fn().mockImplementation(function (this: any) {
+      call++;
+      capturedModel.push(this.model);
+      capturedProvider.push(this.provider);
+      if (call === 1) {
+        // Turn 1's primary attempt: force a retryable error so the loop
+        // crosses to the openai fallback.
+        return Promise.reject(Object.assign(new Error('Overloaded'), { status: 529 }));
+      }
+      // Turn 2's primary attempt: succeeds outright — no fallback needed.
+      return Promise.resolve({ message: { role: 'assistant', content: 'turn 2 ok' }, usage: {} });
+    });
+
+    // Turn 1: primary throws (retryable), crosses to openai via executorFactory.
+    const result1 = await ex.invokeWithFallback([{ role: 'user', content: 'turn 1' }], {});
+    expect(result1.message.content).toBe('from gpt');
+    // Pre-existing, intentional mutation for that turn's trace/cost attribution.
+    expect(ex.provider).toBe('openai');
+    expect(ex.model).toBe('gpt-5.4');
+
+    // Turn 2: same executor instance, reused for the next tool-loop turn.
+    const result2 = await ex.invokeWithFallback([{ role: 'user', content: 'turn 2' }], {});
+    expect(result2.message.content).toBe('turn 2 ok');
+
+    // The regression: the second ex.invoke() call must have seen the
+    // ORIGINAL primary (anthropic/claude-sonnet-4-6), not the leftover
+    // openai/gpt-5.4 from turn 1.
+    expect(capturedProvider[1]).toBe('anthropic');
+    expect(capturedModel[1]).toBe('claude-sonnet-4-6');
+
+    // And no fallback happened this turn (only one invoke call for turn 2),
+    // confirming the primary itself — not a re-triggered fallback — served it.
+    expect(call).toBe(2);
+
+    // After turn 2 completes, state reflects the primary that actually served
+    // it, not turn 1's fallback.
+    expect(ex.provider).toBe('anthropic');
+    expect(ex.model).toBe('claude-sonnet-4-6');
+    expect(ex.primaryModelConfig.name).toBe('claude-sonnet-4-6');
+  });
+
+  it('a same-provider fallback in turn 1 also does not leak into turn 2', async () => {
+    // Same regression, but for the same-provider fallback branch (i > 0,
+    // same provider — reuses this client, just repoints this.model).
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'claude-opus-4-8',   fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'claude-sonnet-4-6', fallbackOrder: 1 },
+      ] },
+    });
+    const ex = new TestExecutor(makeConfig(manifest)) as any;
+
+    const capturedModel: string[] = [];
+    let call = 0;
+    ex.invoke = vi.fn().mockImplementation(function (this: any) {
+      call++;
+      capturedModel.push(this.model);
+      if (call === 1) {
+        // Turn 1: opus fails, falls back to sonnet within the same client.
+        return Promise.reject(Object.assign(new Error('Overloaded'), { status: 529 }));
+      }
+      // Turn 1's fallback attempt (call 2) and turn 2's primary attempt
+      // (call 3) both succeed.
+      return Promise.resolve({ message: { role: 'assistant', content: 'ok' }, usage: {} });
+    });
+
+    await ex.invokeWithFallback([{ role: 'user', content: 'turn 1' }], {});
+    expect(ex.model).toBe('claude-sonnet-4-6'); // turn 1 landed on the fallback
+
+    await ex.invokeWithFallback([{ role: 'user', content: 'turn 2' }], {});
+
+    // Turn 2's invoke (call 3) must have been made with the original primary
+    // (opus), not turn 1's fallback (sonnet).
+    expect(capturedModel[2]).toBe('claude-opus-4-8');
+    expect(ex.model).toBe('claude-opus-4-8');
+  });
+});
+
