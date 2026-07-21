@@ -61,7 +61,7 @@
   },
   "dependencies": {
     "@agnt-sdk/config": "*",
-    "@anthropic-ai/sdk": "^0.32.1",
+    "@anthropic-ai/sdk": "^0.112.4",
     "@aws-sdk/client-bedrock-runtime": "^3.705.0",
     "@google/generative-ai": "^0.24.1",
     "commander": "^12.1.0",
