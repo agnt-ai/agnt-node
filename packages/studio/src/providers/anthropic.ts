@@ -10,6 +10,21 @@ import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '.
 import { fileToAnthropicDocument } from './fileAttachment.js';
 import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
 
+/**
+ * Claude's "reasoning family" — the current models whose reasoning is driven by
+ * adaptive thinking + `output_config.effort`, and which REJECT the legacy
+ * sampling knobs (`temperature`/`top_p`/`top_k`) and `budget_tokens` with a 400.
+ * On these models thinking is OFF unless `thinking: {type:'adaptive'}` is sent
+ * explicitly (Opus 4.7/4.8), so effort has no effect without it. Older Claude
+ * models (Sonnet 4.5, Haiku 4.5, Opus 4.6/4.5) are intentionally excluded — they
+ * use `budget_tokens`, still accept sampling params, and reject `effort`.
+ * Confirmed against the claude-api reference (2026-07-21).
+ */
+const ANTHROPIC_REASONING_FAMILY = /^claude-(opus-4-8|opus-4-7|sonnet-5|fable-5|mythos-5)(-|$)/i;
+
+/** Legacy sampling knobs the reasoning family rejects (400) alongside adaptive thinking. */
+const ANTHROPIC_REASONING_UNSUPPORTED_PARAMS = ['temperature', 'top_p', 'top_k', 'budget_tokens'];
+
 export default class AnthropicExecutor extends BaseExecutor {
   private client: Anthropic;
 
@@ -65,6 +80,12 @@ export default class AnthropicExecutor extends BaseExecutor {
       messages: this.#formatMessages(messages),
       ...providerParams // Spread all provider-specific params
     };
+
+    // Reasoning: opt-in via the model-strategy's `reasoning_effort` (the console
+    // Effort control). When set on a reasoning-family model, turn on adaptive
+    // thinking + `output_config.effort` and drop the params that 400 alongside
+    // it. When unset, this is a no-op — existing behavior is unchanged.
+    this.#applyReasoningParams(params);
     // ── Prompt caching: ALWAYS explicit block-level breakpoints ──────────────
     // A top-level `cache_control` is NOT honored by Anthropic (cache_control
     // lives on content blocks), which left the big stable prefix re-written
@@ -148,11 +169,21 @@ export default class AnthropicExecutor extends BaseExecutor {
       cache_read_input_tokens?: number;
       cache_creation_input_tokens?: number;
     };
+    // Preserve thinking blocks verbatim so they can be echoed back unchanged on
+    // the next same-model turn — Anthropic requires this during tool use with
+    // thinking on, or the following request 400s. Kept in `rawParts` (the same
+    // channel the Google adapter uses for thoughtSignatures) and undefined when
+    // thinking is off, so non-reasoning turns carry nothing.
+    const reasoningBlocks = (response.content || []).filter(
+      (b: any) => b?.type === 'thinking' || b?.type === 'redacted_thinking'
+    );
+
     return {
       message: {
         role: 'assistant',
         content: this.#extractTextContent(response.content),
-        tool_calls: this.#extractToolCalls(response.content)
+        tool_calls: this.#extractToolCalls(response.content),
+        ...(reasoningBlocks.length ? { rawParts: reasoningBlocks } : {})
       },
       usage: {
         input_tokens: response.usage.input_tokens,
@@ -202,6 +233,12 @@ export default class AnthropicExecutor extends BaseExecutor {
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
         const content: any[] = [];
 
+        // Thinking blocks first, verbatim (with signature) — Anthropic requires
+        // them ahead of tool_use on the same-model turn when thinking is on.
+        if (Array.isArray(msg.rawParts) && msg.rawParts.length) {
+          content.push(...msg.rawParts);
+        }
+
         // Add text content if present
         if (msg.content) {
           content.push({
@@ -224,6 +261,20 @@ export default class AnthropicExecutor extends BaseExecutor {
           role: 'assistant',
           content
         });
+        continue;
+      }
+
+      // Assistant final-answer turn that carried thinking blocks: echo them
+      // back verbatim ahead of the text so a same-model continuation doesn't 400.
+      if (msg.role === 'assistant' && Array.isArray(msg.rawParts) && msg.rawParts.length) {
+        const content: any[] = [...msg.rawParts];
+        if (msg.content) {
+          content.push({
+            type: 'text',
+            text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+          });
+        }
+        formatted.push({ role: 'assistant', content });
         continue;
       }
 
@@ -427,5 +478,38 @@ export default class AnthropicExecutor extends BaseExecutor {
     const metadata = (this.primaryModelConfig as any).metadata || {};
     const { displayName, ...providerParams } = metadata;
     return providerParams;
+  }
+
+  /**
+   * Translate `metadata.reasoning_effort` into Anthropic's reasoning surface.
+   * Mutates `params` in place.
+   *
+   * `reasoning_effort` is the cross-provider knob written by the console Effort
+   * control; on Anthropic there is no such top-level param — the equivalent is
+   * `output_config.effort` plus `thinking: {type:'adaptive'}`. We map it only for
+   * the reasoning family (Opus 4.7/4.8, Sonnet 5, Fable 5) and, when we do,
+   * strip the legacy sampling knobs + `budget_tokens` that 400 alongside adaptive
+   * thinking. When `reasoning_effort` is unset, this is a no-op — thinking stays
+   * off and existing behavior is unchanged. `reasoning_effort` itself is always
+   * removed from the outgoing params (it is never a valid Anthropic field).
+   */
+  #applyReasoningParams(params: Record<string, any>): void {
+    const effort = params.reasoning_effort;
+    delete params.reasoning_effort;
+
+    if (!effort) return;
+
+    if (!ANTHROPIC_REASONING_FAMILY.test(this.model || '')) {
+      // e.g. Haiku 4.5 / Sonnet 4.5 — effort + adaptive thinking are rejected
+      // there. Drop rather than send a request we know will 400.
+      this.log(`[AnthropicExecutor] reasoning_effort ignored — ${this.model} is not a reasoning-family model`);
+      return;
+    }
+
+    params.thinking = { type: 'adaptive' };
+    params.output_config = { ...(params.output_config || {}), effort };
+    for (const key of ANTHROPIC_REASONING_UNSUPPORTED_PARAMS) {
+      delete params[key];
+    }
   }
 }
