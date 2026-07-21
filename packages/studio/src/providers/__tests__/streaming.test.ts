@@ -12,6 +12,7 @@ import {
   createStreamGuard,
   streamWithRetry,
   consumeOpenAIStream,
+  consumeOpenAIResponsesStream,
   StreamAbortError,
 } from '../streaming.js';
 
@@ -259,5 +260,53 @@ describe('consumeOpenAIStream', () => {
     const tc = result.choices[0].message.tool_calls!;
     expect(tc.map((t) => t.id)).toEqual(['a', 'b']);
     expect(tc.map((t) => t.function.name)).toEqual(['one', 'two']);
+  });
+});
+
+describe('consumeOpenAIResponsesStream', () => {
+  async function* gen(events: any[]) {
+    for (const e of events) yield e;
+  }
+
+  it('returns the terminal response and bumps once per event', async () => {
+    let bumps = 0;
+    const final = { status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 2 } };
+    const result = await consumeOpenAIResponsesStream(
+      gen([
+        { type: 'response.created', response: { status: 'in_progress' } },
+        { type: 'response.output_text.delta', delta: 'hi' },
+        { type: 'response.completed', response: final },
+      ]),
+      () => { bumps++; }
+    );
+    expect(bumps).toBe(3);
+    expect(result).toBe(final);
+  });
+
+  it('returns a response.incomplete result as-is (partial, not an error)', async () => {
+    const final = { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] };
+    const result = await consumeOpenAIResponsesStream(
+      gen([{ type: 'response.incomplete', response: final }]),
+      () => {}
+    );
+    expect(result).toBe(final);
+  });
+
+  it('throws on a failed response so the whole prompt can retry', async () => {
+    await expect(
+      consumeOpenAIResponsesStream(
+        gen([{ type: 'response.failed', response: { status: 'failed', error: { message: 'boom' } } }]),
+        () => {}
+      )
+    ).rejects.toThrow(/boom/);
+  });
+
+  it('throws when the stream ends without a terminal response event', async () => {
+    await expect(
+      consumeOpenAIResponsesStream(
+        gen([{ type: 'response.output_text.delta', delta: 'x' }]),
+        () => {}
+      )
+    ).rejects.toThrow(/without a terminal response event/);
   });
 });

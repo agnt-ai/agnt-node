@@ -7,7 +7,12 @@
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
-import { streamWithRetry, consumeOpenAIStream, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
+import {
+  streamWithRetry,
+  consumeOpenAIStream,
+  consumeOpenAIResponsesStream,
+  STREAM_ABSOLUTE_BACKSTOP_MS,
+} from './streaming.js';
 
 /**
  * OpenAI's "reasoning family" models (o-series: o1, o3, o4, ...; gpt-5.x)
@@ -30,6 +35,41 @@ function isReasoningFamilyModel(model: string): boolean {
   const normalized = model || '';
   return REASONING_FAMILY_MODEL_PATTERNS.some(pattern => pattern.test(normalized));
 }
+
+/**
+ * Classic sampling knobs OpenAI's reasoning family rejects outright (not just
+ * deprecates) — sending any of them 400s the request. Corroborated by OpenAI's
+ * own community forum, openai-python #2072, and third-party bug reports
+ * (LibreChat #10737, lobe-chat #11332): "Unsupported parameter: 'temperature'"
+ * on o1/o3/gpt-5. These models run internal reasoning passes that sampling
+ * params would destabilize. Stripped from the Responses request; the supported
+ * steering knobs are `reasoning.effort` and `text.verbosity`.
+ */
+const REASONING_UNSUPPORTED_SAMPLING_PARAMS = [
+  'temperature',
+  'top_p',
+  'frequency_penalty',
+  'presence_penalty',
+  'logit_bias',
+  'n',
+  'logprobs',
+  'top_logprobs',
+];
+
+/**
+ * Metadata keys the Responses builder translates into their Responses-API
+ * home rather than passing through as a top-level request param (where they'd
+ * 400 — Chat Completions and Responses spell these differently). See
+ * #buildResponsesRequest.
+ */
+const RESPONSES_TRANSLATED_METADATA_KEYS = [
+  'displayName',
+  'reasoning_effort',
+  'verbosity',
+  'max_tokens',
+  'max_completion_tokens',
+  'max_output_tokens',
+];
 
 export default class OpenAIExecutor extends BaseExecutor {
   private client: OpenAI;
@@ -70,6 +110,19 @@ export default class OpenAIExecutor extends BaseExecutor {
    * Returns: { message: { role, content, tool_calls }, usage: { input_tokens, output_tokens } }
    */
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
+    // Reasoning-family models (o1/o3/o4, gpt-5.x) are served over the OpenAI
+    // Responses API (/v1/responses), not Chat Completions. Chat Completions
+    // rejects the combination that matters most for these models — function
+    // tools + reasoning_effort — with a hard 400 ("Function tools with
+    // reasoning_effort are not supported ... in /v1/chat/completions. To use
+    // function tools, use /v1/responses or set reasoning_effort to 'none'").
+    // Since our runs are tool-heavy AND want effort control, we route the whole
+    // reasoning family through /v1/responses. Everything else stays on the
+    // proven streamed Chat Completions path below.
+    if (isReasoningFamilyModel(this.model)) {
+      return this.#invokeResponses(messages, options);
+    }
+
     // Build request parameters
     const params: any = {
       model: this.model,
@@ -80,15 +133,6 @@ export default class OpenAIExecutor extends BaseExecutor {
     // This passes through any OpenAI API params: temperature, top_p, reasoning, etc.
     const providerParams = this.#extractProviderParams();
     Object.assign(params, providerParams);
-
-    // Reasoning-family models (o1/o3/o4, gpt-5.x) use a different request
-    // shape than the rest of the OpenAI chat-completions surface — translate/
-    // strip in place before the request goes out. See #applyReasoningFamilyParams
-    // for the full story (root-caused in agnt-backend log-sweep 2026-07-16,
-    // findings #33/#34/#37).
-    if (isReasoningFamilyModel(this.model)) {
-      this.#applyReasoningFamilyParams(params);
-    }
 
     // Add tools if provided
     if (options.tools && options.tools.length > 0) {
@@ -165,6 +209,259 @@ export default class OpenAIExecutor extends BaseExecutor {
         cache_read_input_tokens: cachedTokens,
         cache_creation_input_tokens: 0
       }
+    };
+  }
+
+  /**
+   * Invoke OpenAI's Responses API (/v1/responses) for reasoning-family models.
+   * Same streamed idle-guard contract as the Chat Completions path — only the
+   * request shape (input items instead of `messages`, flat function tools,
+   * `reasoning.effort`/`text.verbosity`/`max_output_tokens`) and the response
+   * shape (an `output[]` of items instead of `choices[0].message`) differ.
+   */
+  async #invokeResponses(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
+    const params = this.#buildResponsesRequest(messages, options);
+
+    this.log('[OpenAIExecutor] Invoking (responses):', {
+      model: params.model,
+      effort: params.reasoning?.effort,
+      tools: params.tools?.length || 0,
+    });
+
+    // Streamed, folded back into the terminal Response object (see
+    // consumeOpenAIResponsesStream). The idle timer is bumped on every event;
+    // a mid-stream failure discards the partial and retries the whole prompt.
+    const response = await streamWithRetry(
+      async (guard) => {
+        const stream = await this.client.responses.create(
+          { ...params, stream: true } as any,
+          { signal: guard.signal }
+        );
+        return await consumeOpenAIResponsesStream(stream as any, () => guard.bump());
+      },
+      {
+        externalSignal: options.signal,
+        isRetryable: (err) => this.isRetryableError(err),
+        log: (m) => this.log(m),
+      }
+    );
+
+    return this.#formatResponsesResult(response);
+  }
+
+  /**
+   * Build the /v1/responses request from canonical messages + invoke options.
+   *
+   * Metadata is NOT spread through blindly (that blind passthrough is what 400'd
+   * the reasoning family on Chat Completions — see the sampling-strip note). We
+   * translate the knobs that live somewhere different on Responses and pass the
+   * rest through:
+   *   reasoning_effort           → reasoning.effort
+   *   verbosity                  → text.verbosity
+   *   max_tokens / *_completion_ → max_output_tokens
+   *   temperature/top_p/…        → dropped (rejected by the reasoning family)
+   */
+  #buildResponsesRequest(messages: Message[], options: InvokeOptions): Record<string, any> {
+    const metadata = (this.primaryModelConfig as any).metadata || {};
+
+    const params: Record<string, any> = {
+      model: this.model,
+      input: this.#formatResponsesInput(messages),
+      // Stateless: we replay the full conversation on every turn, so there's no
+      // reason to have OpenAI persist server-side response state.
+      store: false,
+    };
+
+    // Pass through any metadata param that isn't translated below or a rejected
+    // sampling knob — keeps forward-compat for genuine Responses params without
+    // re-introducing the 400.
+    for (const [key, value] of Object.entries(metadata)) {
+      if (RESPONSES_TRANSLATED_METADATA_KEYS.includes(key)) continue;
+      if (REASONING_UNSUPPORTED_SAMPLING_PARAMS.includes(key)) continue;
+      params[key] = value;
+    }
+
+    if (metadata.reasoning_effort) {
+      params.reasoning = { ...(params.reasoning || {}), effort: metadata.reasoning_effort };
+    }
+    if (metadata.verbosity) {
+      params.text = { ...(params.text || {}), verbosity: metadata.verbosity };
+    }
+    const maxOut = metadata.max_output_tokens ?? metadata.max_completion_tokens ?? metadata.max_tokens;
+    if (maxOut != null) {
+      params.max_output_tokens = maxOut;
+    }
+
+    if (options.tools && options.tools.length > 0) {
+      params.tools = options.tools.map(t => this.#formatResponsesTool(t));
+      // Match the Chat Completions path: allow several tool calls in one turn.
+      params.parallel_tool_calls = true;
+    }
+
+    if (options.tool_choice && options.tool_choice !== 'auto') {
+      params.tool_choice = this.#formatResponsesToolChoice(options.tool_choice);
+    }
+
+    return params;
+  }
+
+  /**
+   * Canonical messages → Responses `input` items. The Responses API models a
+   * turn's tool calls and their results as first-class `function_call` /
+   * `function_call_output` items keyed by `call_id`, rather than Chat
+   * Completions' assistant `tool_calls` array + `role:'tool'` messages.
+   */
+  #formatResponsesInput(messages: Message[]): any[] {
+    const input: any[] = [];
+
+    for (const msg of messages) {
+      // Tool result → function_call_output, referenced by the originating
+      // tool call's id. `output` must be a JSON string.
+      if (msg.role === 'tool') {
+        input.push({
+          type: 'function_call_output',
+          call_id: msg.tool_call_id,
+          output:
+            typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
+        });
+        continue;
+      }
+
+      // Assistant turn that made tool calls: emit any text first, then one
+      // function_call item per call so a later function_call_output can bind to
+      // its call_id.
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        if (msg.content) {
+          input.push({ role: 'assistant', content: this.#formatResponsesContent(msg.content, 'assistant') });
+        }
+        for (const tc of msg.tool_calls) {
+          input.push({
+            type: 'function_call',
+            call_id: tc.id,
+            name: tc.name,
+            arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
+          });
+        }
+        continue;
+      }
+
+      // Plain message (system/user/assistant text or multimodal parts).
+      input.push({
+        role: msg.role,
+        content: this.#formatResponsesContent(msg.content, msg.role),
+      });
+    }
+
+    return input;
+  }
+
+  /**
+   * Normalize message content for a Responses input item. Strings pass through.
+   * Chat-Completions-style content parts are remapped to the Responses part
+   * types (text → input_text, image_url → input_image); assistant text parts
+   * use output_text. Unknown parts pass through untouched.
+   */
+  #formatResponsesContent(content: string | any[], role: Message['role']): any {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return content ?? '';
+
+    const textType = role === 'assistant' ? 'output_text' : 'input_text';
+    return content.map(part => {
+      if (!part || typeof part !== 'object') return part;
+      if (part.type === 'text' || part.type === 'input_text' || part.type === 'output_text') {
+        return { type: textType, text: part.text ?? '' };
+      }
+      if (part.type === 'image_url') {
+        const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+        return { type: 'input_image', image_url: url };
+      }
+      return part;
+    });
+  }
+
+  /**
+   * Format a tool definition for the Responses API. Unlike Chat Completions
+   * (`{ type:'function', function:{ name, description, parameters } }`), Responses
+   * flattens the function fields to the top level. `strict:false` mirrors the
+   * Chat Completions default — our tool schemas aren't authored to OpenAI's
+   * strict-mode constraints, and strict:true would reject them.
+   */
+  #formatResponsesTool(tool: any): any {
+    // Nested Chat-Completions shape → flatten.
+    const fn = tool?.function ?? tool;
+    const parameters = fn.parameters ?? tool.input_schema ?? { type: 'object', properties: {} };
+    return {
+      type: 'function',
+      name: fn.name ?? tool.name ?? 'unknown',
+      description: fn.description ?? tool.description ?? '',
+      parameters,
+      strict: false,
+    };
+  }
+
+  /**
+   * Format tool_choice for the Responses API: 'required'/'auto'/'none' strings,
+   * or `{ type:'function', name }` (flat — no nested `function` wrapper).
+   */
+  #formatResponsesToolChoice(toolChoice: any): any {
+    if (typeof toolChoice === 'string') {
+      if (toolChoice === 'required' || toolChoice === 'any') return 'required';
+      if (toolChoice === 'none') return 'none';
+      return 'auto';
+    }
+    const name = toolChoice?.function?.name ?? toolChoice?.name;
+    if (name) return { type: 'function', name };
+    return 'auto';
+  }
+
+  /**
+   * Map a terminal Responses `output[]` + usage back into the executor's
+   * InvokeResult. Assistant `message` items contribute text (output_text /
+   * refusal parts); `function_call` items become canonical tool calls keyed by
+   * their `call_id` (the id a later function_call_output must reference).
+   */
+  #formatResponsesResult(response: any): InvokeResult {
+    let content = '';
+    const tool_calls: Array<{ id: string; name: string; args: Record<string, any> }> = [];
+
+    for (const item of response?.output ?? []) {
+      if (item?.type === 'message') {
+        for (const part of item.content ?? []) {
+          if (part?.type === 'output_text' && typeof part.text === 'string') content += part.text;
+          else if (part?.type === 'refusal' && typeof part.refusal === 'string') content += part.refusal;
+        }
+      } else if (item?.type === 'function_call') {
+        let args: Record<string, any> = {};
+        try {
+          args = JSON.parse(item.arguments || '{}');
+        } catch {
+          this.log(`[OpenAIExecutor] tool "${item.name}" returned unparseable arguments; using {}:`, item.arguments);
+        }
+        tool_calls.push({ id: item.call_id, name: item.name, args });
+      }
+      // reasoning items carry no user-visible content — skipped.
+    }
+
+    // Responses usage: input_tokens INCLUDES cached (input_tokens_details.
+    // cached_tokens is a subset), like Chat Completions' prompt_tokens. Subtract
+    // it out so the four usage buckets stay disjoint across providers.
+    const usage = response?.usage ?? {};
+    const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
+    const inputTokens = usage.input_tokens ?? 0;
+    const outputTokens = usage.output_tokens ?? 0;
+
+    return {
+      message: {
+        role: 'assistant',
+        content,
+        tool_calls,
+      },
+      usage: {
+        input_tokens: Math.max(0, inputTokens - cachedTokens),
+        output_tokens: outputTokens,
+        cache_read_input_tokens: cachedTokens,
+        cache_creation_input_tokens: 0,
+      },
     };
   }
 
@@ -330,55 +627,4 @@ export default class OpenAIExecutor extends BaseExecutor {
     return providerParams;
   }
 
-  /**
-   * Normalize outgoing request params for OpenAI's "reasoning family" models
-   * (o1/o3/o4, gpt-5.x). Mutates `params` in place.
-   *
-   * Root cause (agnt-backend log-sweep 2026-07-16, findings #33/#34/#37):
-   * OpenAIExecutor had ZERO per-model param translation — it blindly passed an
-   * account's model-strategy `metadata` object through as literal OpenAI
-   * request params (see #extractProviderParams above). An account's
-   * model-strategy metadata for `openai/gpt-5.4` carried `max_tokens`
-   * (mirroring the convention used for Anthropic models, where `max_tokens` is
-   * still correct), and the cross-provider fallback path (Anthropic overload →
-   * OpenAI safety net) immediately 400'd:
-   *   "Unsupported parameter: 'max_tokens' is not supported with this model.
-   *    Use 'max_completion_tokens' instead."
-   * i.e. the one time this fallback was needed in prod, it was itself broken.
-   *
-   * `max_tokens` → `max_completion_tokens`: OpenAI's own SDK types mark
-   * `max_tokens` deprecated and explicitly "not compatible with o-series
-   * models" (node_modules/openai/resources/chat/completions/completions.d.ts).
-   *
-   * temperature/top_p (and the other legacy sampling knobs below): dropped
-   * defensively, not just noted-as-a-TODO — corroborated by OpenAI's own
-   * community forum, openai-python issue #2072, and third-party integration
-   * bug reports (LibreChat #10737, lobe-chat #11332) all describing the same
-   * "Unsupported parameter: 'temperature'" 400 on o1/o3/gpt-5 family models.
-   * These models run internal reasoning/verification passes that classic
-   * sampling params would destabilize, so OpenAI disabled them outright rather
-   * than just deprecating them. If a model-strategy needs to steer a reasoning
-   * model's output, the supported knobs are `reasoning_effort` / `verbosity`
-   * (unaffected — they pass through #extractProviderParams unchanged since
-   * they aren't in the strip list below).
-   */
-  #applyReasoningFamilyParams(params: Record<string, any>): void {
-    if ('max_tokens' in params) {
-      params.max_completion_tokens = params.max_tokens;
-      delete params.max_tokens;
-    }
-
-    for (const legacySamplingParam of [
-      'temperature',
-      'top_p',
-      'frequency_penalty',
-      'presence_penalty',
-      'logit_bias',
-      'n',
-      'logprobs',
-      'top_logprobs',
-    ]) {
-      delete params[legacySamplingParam];
-    }
-  }
 }
