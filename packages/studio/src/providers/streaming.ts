@@ -304,3 +304,68 @@ export async function consumeOpenAIStream(
     usage,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenAI Responses API stream consumer (reasoning-family models: o-series, gpt-5.x)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The subset of an OpenAI `Response` (the /v1/responses object) the executor
+ *  consumes. The streamed events are folded back into this final-object shape so
+ *  the non-streamed output/usage extraction runs against one representation. */
+export interface OpenAIResponsesLike {
+  /** Output items: assistant `message`s (content parts) and `function_call`s. */
+  output?: any[];
+  usage?: any;
+  status?: string;
+  error?: { message?: string } | null;
+  incomplete_details?: { reason?: string } | null;
+}
+
+/**
+ * Fold an OpenAI Responses API STREAM back into the terminal `Response` object.
+ *
+ * The Responses stream emits many fine-grained events (`response.output_text.
+ * delta`, `response.function_call_arguments.delta`, …), but every run ends with
+ * a single terminal event — `response.completed`, `response.incomplete`, or
+ * `response.failed` — whose `.response` field carries the FULLY-assembled output
+ * items + usage. Rather than reassemble deltas by hand (as the chat-completions
+ * consumer must), we bump the idle guard on every event and return that terminal
+ * `Response`. `response.incomplete` (e.g. hit `max_output_tokens`) is a real
+ * partial result and is returned as-is; only `failed`/`error`/no-terminal-event
+ * throw so `streamWithRetry` can retry the whole prompt.
+ */
+export async function consumeOpenAIResponsesStream(
+  stream: AsyncIterable<any>,
+  bump: () => void
+): Promise<OpenAIResponsesLike> {
+  let final: OpenAIResponsesLike | null = null;
+  let streamError: any = null;
+
+  for await (const event of stream) {
+    bump();
+    const type = event?.type;
+    if (
+      type === 'response.completed' ||
+      type === 'response.incomplete' ||
+      type === 'response.failed'
+    ) {
+      if (event.response) final = event.response as OpenAIResponsesLike;
+    } else if (type === 'error') {
+      // A top-level stream error event (rare); remember it for the throw below.
+      streamError = event;
+    }
+  }
+
+  if (!final) {
+    const detail = streamError
+      ? `: ${streamError?.message ?? JSON.stringify(streamError)}`
+      : '';
+    throw new Error(`[responses] stream ended without a terminal response event${detail}`);
+  }
+
+  if (final.status === 'failed' || final.error) {
+    throw new Error(`[responses] response failed: ${final.error?.message ?? 'unknown error'}`);
+  }
+
+  return final;
+}
