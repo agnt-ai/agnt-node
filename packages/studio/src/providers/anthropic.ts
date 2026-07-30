@@ -142,6 +142,11 @@ export default class AnthropicExecutor extends BaseExecutor {
     if (options.tool_choice && options.tool_choice !== 'auto') {
       params.tool_choice = this.#formatToolChoice(options.tool_choice);
     }
+    // Anthropic rejects tool_choice:{type:'tool'} ('specified') when thinking is active.
+    // Downgrade to 'any' — still forces a tool call, compatible with thinking.
+    if (params.thinking && params.tool_choice?.type === 'tool') {
+      params.tool_choice = { type: 'any' };
+    }
 
     // Call Anthropic API — STREAMED. `messages.stream()` accumulates text and
     // tool_use (partial_json) deltas internally and `finalMessage()` returns the

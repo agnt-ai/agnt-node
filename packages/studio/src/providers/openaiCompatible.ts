@@ -149,6 +149,15 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
     if (options.tool_choice && options.tool_choice !== 'auto') {
       params.tool_choice = this.#formatToolChoice(options.tool_choice);
     }
+    // Reasoning-only models (Kimi K3) reject a forced specific-function tool_choice
+    // alongside built-in reasoning. Downgrade to 'required' — still forces a tool call.
+    if (
+      needsReasoningFamilyParams(this.providerName, this.model) &&
+      typeof params.tool_choice === 'object' &&
+      params.tool_choice?.type === 'function'
+    ) {
+      params.tool_choice = 'required';
+    }
 
     this.log(`[OpenAICompatibleExecutor:${this.providerName}] Invoking:`, {
       model: params.model,
