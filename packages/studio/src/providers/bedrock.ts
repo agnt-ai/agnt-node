@@ -105,6 +105,13 @@ export default class BedrockExecutor extends BaseExecutor {
     const output = response.output;
     const message = output!.message;
 
+    // Surface Converse's stopReason so the caller can see terminal conditions
+    // that arrive as a SUCCESS. Notably `model_context_window_exceeded`: a
+    // context-window overflow comes back as HTTP 200 with an empty output
+    // message and no error string, so stopReason is the ONLY signal it happened.
+    // Passed through verbatim and uninterpreted — what a stopReason should cause
+    // is the caller's policy decision, not this adapter's. Spread so a response
+    // without one is byte-identical to what we returned before.
     return {
       message: {
         role: 'assistant',
@@ -114,7 +121,8 @@ export default class BedrockExecutor extends BaseExecutor {
       usage: {
         input_tokens: response.usage!.inputTokens!,
         output_tokens: response.usage!.outputTokens!
-      }
+      },
+      ...(response.stopReason ? { stopReason: response.stopReason } : {})
     };
   }
 

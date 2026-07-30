@@ -92,6 +92,22 @@ export function openAIToolCallStream(
   })();
 }
 
+/** Build an async-iterable OpenAI Responses API STREAM that delivers a given
+ *  terminal `Response` object. Emits a couple of fine-grained delta events (so
+ *  the adapter's idle-timer bump fires more than once) then the terminal
+ *  `response.completed` event carrying the full response — the shape
+ *  consumeOpenAIResponsesStream folds back. */
+export function openAIResponsesStreamFromResponse(response: any): AsyncIterable<any> {
+  const events: any[] = [
+    { type: 'response.created', response: { status: 'in_progress' } },
+    { type: 'response.output_text.delta', delta: '' },
+    { type: 'response.completed', response },
+  ];
+  return (async function* () {
+    for (const e of events) yield e;
+  })();
+}
+
 /** Stand-in for GenerateContentStreamResult: the per-chunk stream plus the
  *  aggregated `response` promise the adapter awaits. `response` is the inner
  *  GenerateContentResponse (candidates + usageMetadata). The 2nd arg is either a
