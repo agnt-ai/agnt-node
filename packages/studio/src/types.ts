@@ -117,6 +117,19 @@ export interface InvokeResult {
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
   };
+  /** Why the provider stopped generating, verbatim from the wire — currently
+   *  supplied only by Bedrock's Converse API (`response.stopReason`), which is
+   *  also where the name comes from. Undefined for providers that don't report
+   *  one; callers must treat absence as "unknown", not as a normal stop.
+   *
+   *  This exists because Converse can report a context-window overflow as a
+   *  SUCCESSFUL HTTP 200 whose stopReason is the documented enum value
+   *  `model_context_window_exceeded`, with an empty output message and no error
+   *  anywhere in the payload — so no error-message pattern can detect it. The
+   *  string is transported UNINTERPRETED: deciding what a given stopReason
+   *  means (retry, park, surface to the user) is the caller's policy, not this
+   *  package's. */
+  stopReason?: string;
 }
 
 export interface ExecutionResult {
