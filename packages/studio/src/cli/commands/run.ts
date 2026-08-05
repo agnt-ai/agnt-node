@@ -1,14 +1,19 @@
 /**
  * agnt run — pull task/chat run detail from the DB via API (no bastion, no log scraping)
  *
+ * Uses the same /tasks and /chats endpoints the agnt-console developer view
+ * already uses — an account-level API key gets the same account-wide
+ * visibility a console session does (see agnt-backend#3059). There is no
+ * separate admin surface: this is just another client of the existing API.
+ *
  * Usage:
- *   agnt run list [--since 24h] [--account <slug>] [--limit 50] [--profile <name>] [--json]
+ *   agnt run list [--since 24h] [--status active] [--limit 50] [--profile <name>] [--json]
  *   agnt run task <taskId> [--profile <name>] [--json]
  *   agnt run chat <chatId> [--profile <name>] [--json]
  */
 
 import { resolveProfile } from '../utils/credentials.js';
-import { AgntApiClient, type RunSummary } from '../utils/api.js';
+import { AgntApiClient, type TaskSummary, type ChatSummary } from '../utils/api.js';
 
 const TRUNCATE_LEN = 400;
 
@@ -16,6 +21,22 @@ function truncate(value: unknown): string {
   const str = typeof value === 'string' ? value : JSON.stringify(value);
   if (!str) return '';
   return str.length > TRUNCATE_LEN ? `${str.slice(0, TRUNCATE_LEN)}… (${str.length} chars)` : str;
+}
+
+// "24h" / "45m" / "2d" / an ISO timestamp -> a Date to filter client-side by.
+// The API has no server-side time-window filter, so `--since` is applied
+// after fetching the newest page — this just bounds what gets printed.
+function parseSince(raw: string): Date {
+  const match = /^(\d+)(h|m|d)?$/.exec(raw.trim());
+  if (match) {
+    const amount = Number(match[1]);
+    const unit = match[2] || 'h';
+    const ms = unit === 'm' ? amount * 60_000 : unit === 'd' ? amount * 86_400_000 : amount * 3_600_000;
+    return new Date(Date.now() - ms);
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid --since value: "${raw}"`);
+  return parsed;
 }
 
 function renderActivity(activity: Record<string, any>): void {
@@ -43,17 +64,6 @@ function renderActivity(activity: Record<string, any>): void {
   console.log(`[${time}] ${activity.type}`);
 }
 
-function renderRunSummary(label: string, items: RunSummary[]): void {
-  if (!items.length) {
-    console.log(`  (none)`);
-    return;
-  }
-  for (const item of items) {
-    const account = item.account ? `${item.account.slug}` : 'unknown-account';
-    console.log(`  ${item.id}  [${item.status}]  ${account}  ${item.title ?? ''}`.trimEnd());
-  }
-}
-
 async function clientFor(profile?: string): Promise<AgntApiClient> {
   const { apiUrl, apiKey } = await resolveProfile(profile);
   return new AgntApiClient({ apiUrl, serviceKey: apiKey });
@@ -61,7 +71,7 @@ async function clientFor(profile?: string): Promise<AgntApiClient> {
 
 export interface RunListOptions {
   since?: string;
-  account?: string;
+  status?: string;
   limit?: string;
   profile?: string;
   json?: boolean;
@@ -70,26 +80,38 @@ export interface RunListOptions {
 export async function runList(opts: RunListOptions): Promise<void> {
   try {
     const client = await clientFor(opts.profile);
-    const result = await client.listRuns({
-      since: opts.since,
-      account: opts.account,
-      limit: opts.limit ? Number(opts.limit) : undefined,
-    });
+    const perPage = opts.limit ? Number(opts.limit) : 50;
+    const since = opts.since ? parseSince(opts.since) : null;
+
+    const [{ tasks }, { chats }] = await Promise.all([
+      client.listTasks({ status: opts.status, perPage }),
+      client.listChats({ status: opts.status, perPage }),
+    ]);
+
+    const recentTasks = since ? tasks.filter(t => new Date(t.updatedAt ?? t.createdAt) >= since) : tasks;
+    const recentChats = since ? chats.filter(c => new Date(c.lastMessageAt ?? c.updatedAt ?? c.createdAt) >= since) : chats;
 
     if (opts.json) {
-      console.log(JSON.stringify(result, null, 2));
+      console.log(JSON.stringify({ tasks: recentTasks, chats: recentChats }, null, 2));
       return;
     }
 
-    console.log(`Active since ${result.since}`);
-    console.log(`\nTasks (${result.tasks.length}):`);
-    renderRunSummary('tasks', result.tasks);
-    console.log(`\nChats (${result.chats.length}):`);
-    renderRunSummary('chats', result.chats);
+    console.log(`Tasks (${recentTasks.length}${since ? ` since ${since.toISOString()}` : ''}):`);
+    renderSummaryList(recentTasks, (t: TaskSummary) => `${t.id}  [${t.status}]  ${t.title ?? ''}`.trimEnd());
+    console.log(`\nChats (${recentChats.length}${since ? ` since ${since.toISOString()}` : ''}):`);
+    renderSummaryList(recentChats, (c: ChatSummary) => `${c.id}  [${c.status}]  ${c.title ?? ''}`.trimEnd());
   } catch (err: any) {
     console.error(err.message);
     process.exit(1);
   }
+}
+
+function renderSummaryList<T>(items: T[], line: (item: T) => string): void {
+  if (!items.length) {
+    console.log('  (none)');
+    return;
+  }
+  for (const item of items) console.log(`  ${line(item)}`);
 }
 
 export interface RunGetOptions {
@@ -100,17 +122,21 @@ export interface RunGetOptions {
 export async function runGetTask(taskId: string, opts: RunGetOptions): Promise<void> {
   try {
     const client = await clientFor(opts.profile);
-    const run = await client.getTaskRun(taskId);
+    const [task, { activities }] = await Promise.all([
+      client.getTask(taskId),
+      client.getTaskActivities(taskId, { limit: 100 }),
+    ]);
+    const chronological = [...activities].reverse();
 
     if (opts.json) {
-      console.log(JSON.stringify(run, null, 2));
+      console.log(JSON.stringify({ task, activities: chronological }, null, 2));
       return;
     }
 
-    console.log(`Task ${run.task.id}  [${run.task.status}]  ${run.task.title ?? ''}`.trimEnd());
-    console.log(`Owner: ${run.task.ownerEmail ?? '?'}  Account: ${run.task.account ?? '?'}`);
+    console.log(`Task ${task.id}  [${task.status}]  ${task.title ?? ''}`.trimEnd());
+    console.log(`Owner: ${task.ownerEmail ?? '?'}`);
     console.log('');
-    for (const activity of run.activities) renderActivity(activity);
+    for (const activity of chronological) renderActivity(activity);
   } catch (err: any) {
     console.error(err.message);
     process.exit(1);
@@ -120,17 +146,19 @@ export async function runGetTask(taskId: string, opts: RunGetOptions): Promise<v
 export async function runGetChat(chatId: string, opts: RunGetOptions): Promise<void> {
   try {
     const client = await clientFor(opts.profile);
-    const run = await client.getChatRun(chatId);
+    const [chat, { activities }] = await Promise.all([
+      client.getChat(chatId),
+      client.getChatActivities(chatId, { limit: 100 }),
+    ]);
 
     if (opts.json) {
-      console.log(JSON.stringify(run, null, 2));
+      console.log(JSON.stringify({ chat, activities }, null, 2));
       return;
     }
 
-    console.log(`Chat ${run.chat.id}  [${run.chat.status}]  ${run.chat.title ?? ''}`.trimEnd());
-    console.log(`Account: ${run.chat.account ?? '?'}`);
+    console.log(`Chat ${chat.id}  [${chat.status}]  ${chat.title ?? ''}`.trimEnd());
     console.log('');
-    for (const activity of run.activities) renderActivity(activity);
+    for (const activity of activities) renderActivity(activity);
   } catch (err: any) {
     console.error(err.message);
     process.exit(1);

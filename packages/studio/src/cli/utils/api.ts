@@ -25,44 +25,12 @@ export interface PublicPromptListItem {
   visibility: string;
 }
 
-export interface RunSummary {
-  id: string;
-  status: string;
-  assistant: string | null;
-  account: { slug: string; name: string } | null;
-  title: string | null;
-  ownerEmail?: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface TaskRun {
-  task: {
-    id: string;
-    status: string;
-    assistant: string | null;
-    account: string | null;
-    ownerEmail: string | null;
-    title: string | null;
-    createdAt: string;
-    updatedAt: string;
-  };
-  activities: Record<string, any>[];
-}
-
-export interface ChatRun {
-  chat: {
-    id: string;
-    status: string;
-    assistant: string | null;
-    account: string | null;
-    title: string | null;
-    lastMessageAt: string | null;
-    createdAt: string;
-    updatedAt: string;
-  };
-  activities: Record<string, any>[];
-}
+// Loosely typed on purpose — these mirror Task.serialize()/Chat.serialize()/
+// TaskActivity.serialize(), which carry many optional fields we don't need
+// to fully model for a debugging CLI. `--json` always exposes the raw shape.
+export type TaskSummary = Record<string, any>;
+export type ChatSummary = Record<string, any>;
+export type Activity = Record<string, any>;
 
 export class AgntApiClient {
   private apiUrl: string;
@@ -126,39 +94,99 @@ export class AgntApiClient {
   }
 
   /**
-   * List tasks/chats with activity in a time window. Cross-tenant — requires
-   * an internal (superadmin) API key. See functions/agnt-api/controllers/adminRunsController.mjs.
+   * GET /tasks — account-scoped (an account-level API key sees every task in
+   * the account, same as a console session; a user-scoped key sees only its
+   * own). Sorted newest-created first.
    */
-  async listRuns(params: { since?: string; account?: string; limit?: number } = {}): Promise<{
-    since: string;
-    tasks: RunSummary[];
-    chats: RunSummary[];
+  async listTasks(params: { status?: string; perPage?: number; page?: number } = {}): Promise<{
+    tasks: TaskSummary[];
+    total: number;
   }> {
     const query = new URLSearchParams();
-    if (params.since) query.set('since', params.since);
-    if (params.account) query.set('account', params.account);
-    if (params.limit) query.set('limit', String(params.limit));
+    if (params.status) query.set('status', params.status);
+    if (params.perPage) query.set('perPage', String(params.perPage));
+    if (params.page) query.set('page', String(params.page));
     const qs = query.toString();
-    return this.request<{ ok: boolean; since: string; tasks: RunSummary[]; chats: RunSummary[] }>(
-      `/admin/runs${qs ? `?${qs}` : ''}`,
+    const data = await this.request<{ ok: boolean; tasks: TaskSummary[]; total: number }>(
+      `/tasks${qs ? `?${qs}` : ''}`,
+      {},
+      true
+    );
+    return { tasks: data.tasks, total: data.total };
+  }
+
+  /**
+   * GET /chats — same account-wide/user-scoped split as listTasks. Sorted by
+   * lastMessageAt, newest first.
+   */
+  async listChats(params: { status?: string; perPage?: number; page?: number } = {}): Promise<{
+    chats: ChatSummary[];
+    total: number;
+  }> {
+    const query = new URLSearchParams();
+    if (params.status) query.set('status', params.status);
+    if (params.perPage) query.set('perPage', String(params.perPage));
+    if (params.page) query.set('page', String(params.page));
+    const qs = query.toString();
+    const data = await this.request<{ ok: boolean; chats: ChatSummary[]; total: number }>(
+      `/chats${qs ? `?${qs}` : ''}`,
+      {},
+      true
+    );
+    return { chats: data.chats, total: data.total };
+  }
+
+  /**
+   * GET /tasks/:taskId — task metadata (title, status, owner, account, etc.)
+   */
+  async getTask(taskId: string): Promise<TaskSummary> {
+    const data = await this.request<{ ok: boolean; task: TaskSummary }>(`/tasks/${taskId}`, {}, true);
+    return data.task;
+  }
+
+  /**
+   * GET /chats/:chatId — chat metadata.
+   */
+  async getChat(chatId: string): Promise<ChatSummary> {
+    const data = await this.request<{ ok: boolean; chat: ChatSummary }>(`/chats/${chatId}`, {}, true);
+    return data.chat;
+  }
+
+  /**
+   * GET /tasks/:taskId/activities — the full tool-call/tool-result timeline
+   * (and every other activity type), paginated newest-first, cursor via `before`.
+   */
+  async getTaskActivities(taskId: string, params: { limit?: number; before?: string } = {}): Promise<{
+    activities: Activity[];
+    hasMore: boolean;
+    cursor: string | null;
+  }> {
+    const query = new URLSearchParams();
+    if (params.limit) query.set('limit', String(params.limit));
+    if (params.before) query.set('before', params.before);
+    const qs = query.toString();
+    return this.request<{ ok: boolean; activities: Activity[]; hasMore: boolean; cursor: string | null }>(
+      `/tasks/${taskId}/activities${qs ? `?${qs}` : ''}`,
       {},
       true
     );
   }
 
   /**
-   * Full TaskActivity timeline for one task, any tenant.
+   * GET /chats/:chatId/activities — same as getTaskActivities, for a chat.
    */
-  async getTaskRun(taskId: string): Promise<TaskRun> {
-    const data = await this.request<{ ok: boolean; run: TaskRun }>(`/admin/runs/tasks/${taskId}`, {}, true);
-    return data.run;
-  }
-
-  /**
-   * Full TaskActivity timeline for one chat, any tenant.
-   */
-  async getChatRun(chatId: string): Promise<ChatRun> {
-    const data = await this.request<{ ok: boolean; run: ChatRun }>(`/admin/runs/chats/${chatId}`, {}, true);
-    return data.run;
+  async getChatActivities(chatId: string, params: { limit?: number; before?: string } = {}): Promise<{
+    activities: Activity[];
+  }> {
+    const query = new URLSearchParams();
+    if (params.limit) query.set('limit', String(params.limit));
+    if (params.before) query.set('before', params.before);
+    const qs = query.toString();
+    const data = await this.request<{ ok: boolean; activities: Activity[] }>(
+      `/chats/${chatId}/activities${qs ? `?${qs}` : ''}`,
+      {},
+      true
+    );
+    return { activities: data.activities };
   }
 }

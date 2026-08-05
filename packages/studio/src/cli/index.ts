@@ -46,17 +46,17 @@ program
 
 const runCmd = program
   .command('run')
-  .description('Inspect agent run detail (tasks/chats) pulled from the DB — no bastion, no log scraping');
+  .description('Inspect agent run detail (tasks/chats) via the same API agnt-console uses — no bastion, no log scraping');
 
 runCmd
   .command('list')
-  .description('List tasks/chats with activity in a time window')
-  .option('--since <window>', 'Time window, e.g. 24h, 45m, 2d, or an ISO timestamp', '24h')
-  .option('--account <slug>', 'Restrict to one account (omit for all tenants)')
+  .description('List recent tasks/chats (client-side filtered by --since; the API has no server-side time filter)')
+  .option('--since <window>', 'Time window, e.g. 24h, 45m, 2d, or an ISO timestamp')
+  .option('--status <status>', 'Filter by status (task/chat status value)')
   .option('--limit <n>', 'Max results per collection', '50')
   .option('--profile <name>', 'Credentials profile to use')
   .option('--json', 'Print raw JSON instead of a human-readable summary')
-  .action(async (opts: { since: string; account?: string; limit: string; profile?: string; json?: boolean }) => {
+  .action(async (opts: { since?: string; status?: string; limit: string; profile?: string; json?: boolean }) => {
     await runList(opts);
   });
 
