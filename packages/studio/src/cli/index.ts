@@ -6,13 +6,15 @@
 import { Command } from 'commander';
 import { runInit } from './commands/init.js';
 import { runPull } from './commands/pull.js';
+import { runConfigure } from './commands/configure.js';
+import { runList, runGetTask, runGetChat } from './commands/run.js';
 
 const program = new Command();
 
 program
   .name('agnt')
   .description('Agnt SDK CLI — manage and run v2 prompt manifests')
-  .version('0.0.1');
+  .version('0.0.46');
 
 program
   .command('init')
@@ -30,6 +32,50 @@ program
   )
   .action(async (address?: string) => {
     await runPull(address);
+  });
+
+program
+  .command('configure')
+  .description('Save an API profile to ~/.agnt/credentials (like `aws configure --profile`)')
+  .requiredOption('--profile <name>', 'Profile name')
+  .requiredOption('--api-url <url>', 'Agnt API base URL')
+  .requiredOption('--api-key <key>', 'API key (ak_live_...)')
+  .action(async (opts: { profile: string; apiUrl: string; apiKey: string }) => {
+    await runConfigure(opts);
+  });
+
+const runCmd = program
+  .command('run')
+  .description('Inspect agent run detail (tasks/chats) pulled from the DB — no bastion, no log scraping');
+
+runCmd
+  .command('list')
+  .description('List tasks/chats with activity in a time window')
+  .option('--since <window>', 'Time window, e.g. 24h, 45m, 2d, or an ISO timestamp', '24h')
+  .option('--account <slug>', 'Restrict to one account (omit for all tenants)')
+  .option('--limit <n>', 'Max results per collection', '50')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable summary')
+  .action(async (opts: { since: string; account?: string; limit: string; profile?: string; json?: boolean }) => {
+    await runList(opts);
+  });
+
+runCmd
+  .command('task <taskId>')
+  .description('Fetch the full activity timeline for one task')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable transcript')
+  .action(async (taskId: string, opts: { profile?: string; json?: boolean }) => {
+    await runGetTask(taskId, opts);
+  });
+
+runCmd
+  .command('chat <chatId>')
+  .description('Fetch the full activity timeline for one chat')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable transcript')
+  .action(async (chatId: string, opts: { profile?: string; json?: boolean }) => {
+    await runGetChat(chatId, opts);
   });
 
 program.parse(process.argv);
