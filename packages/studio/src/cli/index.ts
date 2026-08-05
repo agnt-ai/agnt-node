@@ -62,19 +62,23 @@ runCmd
 
 runCmd
   .command('task <taskId>')
-  .description('Fetch the full activity timeline for one task')
+  .description('Fetch the full activity timeline for one task (paginates automatically)')
   .option('--profile <name>', 'Credentials profile to use')
   .option('--json', 'Print raw JSON instead of a human-readable transcript')
-  .action(async (taskId: string, opts: { profile?: string; json?: boolean }) => {
+  .option('--max <n>', 'Max activities to fetch before stopping', '1000')
+  .option('--all', 'No cap — fetch every activity, however many pages that takes')
+  .action(async (taskId: string, opts: { profile?: string; json?: boolean; max?: string; all?: boolean }) => {
     await runGetTask(taskId, opts);
   });
 
 runCmd
   .command('chat <chatId>')
-  .description('Fetch the full activity timeline for one chat')
+  .description('Fetch the full activity timeline for one chat (paginates automatically)')
   .option('--profile <name>', 'Credentials profile to use')
   .option('--json', 'Print raw JSON instead of a human-readable transcript')
-  .action(async (chatId: string, opts: { profile?: string; json?: boolean }) => {
+  .option('--max <n>', 'Max activities to fetch before stopping', '1000')
+  .option('--all', 'No cap — fetch every activity, however many pages that takes')
+  .action(async (chatId: string, opts: { profile?: string; json?: boolean; max?: string; all?: boolean }) => {
     await runGetChat(chatId, opts);
   });
 

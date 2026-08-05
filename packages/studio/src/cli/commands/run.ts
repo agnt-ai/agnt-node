@@ -13,9 +13,45 @@
  */
 
 import { resolveProfile } from '../utils/credentials.js';
-import { AgntApiClient, type TaskSummary, type ChatSummary } from '../utils/api.js';
+import { AgntApiClient, type TaskSummary, type ChatSummary, type Activity } from '../utils/api.js';
 
 const TRUNCATE_LEN = 400;
+const DEFAULT_MAX_ACTIVITIES = 1000;
+const PAGE_SIZE = 100;
+
+type FetchPage = (before?: string) => Promise<{ activities: Activity[]; hasMore: boolean; cursor: string | null }>;
+
+// Both /tasks/:id/activities and /chats/:id/activities page backward
+// (newest-first, `before` cursor). Agentic tool loops can run into the
+// thousands of activities, so this loops until hasMore is false or `max`
+// is hit — never silently caps at one page. Concatenating pages in fetch
+// order (each page itself newest-first) keeps the whole thing newest-first;
+// reversed once at the end for chronological display.
+async function fetchAllActivities(
+  fetchPage: FetchPage,
+  { max, all }: { max: number; all: boolean }
+): Promise<{ activities: Activity[]; truncated: boolean }> {
+  const pages: Activity[][] = [];
+  let cursor: string | undefined;
+  let total = 0;
+  let truncated = false;
+
+  while (true) {
+    const { activities, hasMore, cursor: nextCursor } = await fetchPage(cursor);
+    pages.push(activities);
+    total += activities.length;
+
+    if (!hasMore) break;
+    if (!all && total >= max) {
+      truncated = true;
+      break;
+    }
+    if (!nextCursor) break; // defensive: hasMore true but no cursor shouldn't happen
+    cursor = nextCursor;
+  }
+
+  return { activities: pages.flat().reverse(), truncated };
+}
 
 function truncate(value: unknown): string {
   const str = typeof value === 'string' ? value : JSON.stringify(value);
@@ -117,26 +153,38 @@ function renderSummaryList<T>(items: T[], line: (item: T) => string): void {
 export interface RunGetOptions {
   profile?: string;
   json?: boolean;
+  max?: string;
+  all?: boolean;
+}
+
+function warnIfTruncated(truncated: boolean, fetchedCount: number): void {
+  if (truncated) {
+    console.error(`(showing the most recent ${fetchedCount} activities — pass --all to fetch everything, or --max <n> to raise the cap)`);
+  }
 }
 
 export async function runGetTask(taskId: string, opts: RunGetOptions): Promise<void> {
   try {
     const client = await clientFor(opts.profile);
-    const [task, { activities }] = await Promise.all([
+    const max = opts.max ? Number(opts.max) : DEFAULT_MAX_ACTIVITIES;
+    const [task, { activities, truncated }] = await Promise.all([
       client.getTask(taskId),
-      client.getTaskActivities(taskId, { limit: 100 }),
+      fetchAllActivities(
+        before => client.getTaskActivities(taskId, { limit: PAGE_SIZE, before }),
+        { max, all: !!opts.all }
+      ),
     ]);
-    const chronological = [...activities].reverse();
 
     if (opts.json) {
-      console.log(JSON.stringify({ task, activities: chronological }, null, 2));
+      console.log(JSON.stringify({ task, activities, truncated }, null, 2));
       return;
     }
 
     console.log(`Task ${task.id}  [${task.status}]  ${task.title ?? ''}`.trimEnd());
     console.log(`Owner: ${task.ownerEmail ?? '?'}`);
+    warnIfTruncated(truncated, activities.length);
     console.log('');
-    for (const activity of chronological) renderActivity(activity);
+    for (const activity of activities) renderActivity(activity);
   } catch (err: any) {
     console.error(err.message);
     process.exit(1);
@@ -146,17 +194,22 @@ export async function runGetTask(taskId: string, opts: RunGetOptions): Promise<v
 export async function runGetChat(chatId: string, opts: RunGetOptions): Promise<void> {
   try {
     const client = await clientFor(opts.profile);
-    const [chat, { activities }] = await Promise.all([
+    const max = opts.max ? Number(opts.max) : DEFAULT_MAX_ACTIVITIES;
+    const [chat, { activities, truncated }] = await Promise.all([
       client.getChat(chatId),
-      client.getChatActivities(chatId, { limit: 100 }),
+      fetchAllActivities(
+        before => client.getChatActivities(chatId, { limit: PAGE_SIZE, before }),
+        { max, all: !!opts.all }
+      ),
     ]);
 
     if (opts.json) {
-      console.log(JSON.stringify({ chat, activities }, null, 2));
+      console.log(JSON.stringify({ chat, activities, truncated }, null, 2));
       return;
     }
 
     console.log(`Chat ${chat.id}  [${chat.status}]  ${chat.title ?? ''}`.trimEnd());
+    warnIfTruncated(truncated, activities.length);
     console.log('');
     for (const activity of activities) renderActivity(activity);
   } catch (err: any) {

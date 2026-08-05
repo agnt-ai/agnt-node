@@ -173,20 +173,22 @@ export class AgntApiClient {
   }
 
   /**
-   * GET /chats/:chatId/activities — same as getTaskActivities, for a chat.
+   * GET /chats/:chatId/activities — same cursor-pagination contract as
+   * getTaskActivities (newest-first, un-reversed).
    */
   async getChatActivities(chatId: string, params: { limit?: number; before?: string } = {}): Promise<{
     activities: Activity[];
+    hasMore: boolean;
+    cursor: string | null;
   }> {
     const query = new URLSearchParams();
     if (params.limit) query.set('limit', String(params.limit));
     if (params.before) query.set('before', params.before);
     const qs = query.toString();
-    const data = await this.request<{ ok: boolean; activities: Activity[] }>(
+    return this.request<{ ok: boolean; activities: Activity[]; hasMore: boolean; cursor: string | null }>(
       `/chats/${chatId}/activities${qs ? `?${qs}` : ''}`,
       {},
       true
     );
-    return { activities: data.activities };
   }
 }
