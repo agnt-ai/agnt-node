@@ -46,7 +46,7 @@ program
 
 const runCmd = program
   .command('run')
-  .description('Inspect agent run detail (tasks/chats) via the same API agnt-console uses — no bastion, no log scraping');
+  .description('Inspect agent run detail (tasks/chats) via the Agnt API — no bastion, no log scraping');
 
 runCmd
   .command('list')

@@ -57,7 +57,7 @@ agnt init
 
 ### `agnt configure` / `agnt run` — pull task/chat run detail from the DB
 
-For debugging what an agent actually did on a task or chat — every tool call and result, not just the message transcript — without tunneling into the database or scraping logs. Uses the same `/tasks` and `/chats` API agnt-console itself uses, so it needs a real API key, not the project-level `agnt.config.js`.
+For debugging what an agent actually did on a task or chat — every tool call and result, not just the message transcript — without tunneling into the database or scraping logs. Uses the standard `/tasks` and `/chats` API, so it needs a real API key, not the project-level `agnt.config.js`.
 
 **Setup — mint an API key, then save it as a named profile** (AWS-CLI style; profiles live in `~/.agnt/credentials`, independent of any project):
 
@@ -85,7 +85,7 @@ agnt run task <taskId> --all --profile production
 agnt run task <taskId> --json --profile production
 ```
 
-An account-level API key (one created without a specific `userId`) sees everything in its account, the same as logging into agnt-console — see [agnt-backend#3059](https://github.com/agnt-ai/agnt-backend/pull/3059) for how that's enforced. A user-scoped key only sees that one user's own tasks/chats.
+An account-level API key (one created without a specific `userId`) sees everything in its account. A user-scoped key only sees that one user's own tasks/chats.
 
 ## Programmatic use
 

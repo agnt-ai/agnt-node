@@ -95,8 +95,7 @@ export class AgntApiClient {
 
   /**
    * GET /tasks — account-scoped (an account-level API key sees every task in
-   * the account, same as a console session; a user-scoped key sees only its
-   * own). Sorted newest-created first.
+   * the account; a user-scoped key sees only its own). Sorted newest-created first.
    */
   async listTasks(params: { status?: string; perPage?: number; page?: number } = {}): Promise<{
     tasks: TaskSummary[];

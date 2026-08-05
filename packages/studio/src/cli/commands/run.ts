@@ -1,9 +1,9 @@
 /**
  * agnt run — pull task/chat run detail from the DB via API (no bastion, no log scraping)
  *
- * Uses the same /tasks and /chats endpoints the agnt-console developer view
- * already uses — an account-level API key gets the same account-wide
- * visibility a console session does (see agnt-backend#3059). There is no
+ * Uses the standard /tasks and /chats API — an account-level API key (one
+ * created without a specific userId) gets account-wide visibility, the same
+ * as your own dashboard already shows for your account. There is no
  * separate admin surface: this is just another client of the existing API.
  *
  * Usage:
