@@ -1066,12 +1066,31 @@ export default class BaseExecutor {
     //     API contract), but the number of REAL executions — and therefore
     //     the transcript growth for this turn — is bounded regardless of how
     //     many calls the model emitted.
-    const signatureOf = (tc: ToolCall) => `${tc.name} ${JSON.stringify(tc.args ?? {})}`;
+    // Captured ONCE, before any call executes -- executeOneToolCall mutates
+    // tc.args in place (normalizeToolArgs coercion, before_tool_call hook
+    // rewrites), so recomputing a call's signature AFTER execution would
+    // silently diverge from the value captured here. That divergence used to
+    // make a genuinely-executed, ordinary single call (e.g. a numeric arg
+    // normalized from "5" to 5) get reported back to the model as skipped
+    // over the cap, nowhere near 25 calls -- undermining the whole point of
+    // this cap (a model told its call was "skipped" when it actually ran has
+    // every reason to retry it, causing a real duplicate side effect). A
+    // failure to serialize (e.g. a circular reference in args) falls back to
+    // a per-index unique signature rather than throwing and crashing the
+    // whole batch -- that call simply is not deduped against anything.
+    const signatureOf = (tc: ToolCall, index: number): string => {
+      try {
+        return JSON.stringify({ name: tc.name, args: tc.args ?? {} });
+      } catch {
+        return `__unserializable__:${index}`;
+      }
+    };
+    const signatures = toolCalls.map((tc, i) => signatureOf(tc, i));
 
     const firstIndexBySignature = new Map<string, number>();
     const order: string[] = [];
     for (let i = 0; i < toolCalls.length; i++) {
-      const sig = signatureOf(toolCalls[i]);
+      const sig = signatures[i];
       if (!firstIndexBySignature.has(sig)) {
         firstIndexBySignature.set(sig, i);
         order.push(sig);
@@ -1088,20 +1107,20 @@ export default class BaseExecutor {
       contentBySignature.set(sig, await this.executeOneToolCall(tc));
     }
 
-    const results: ToolResult[] = toolCalls.map(tc => {
-      const sig = signatureOf(tc);
+    const results: ToolResult[] = toolCalls.map((tc, i) => {
+      const sig = signatures[i]; // reuse the captured signature -- never recompute post-mutation
       const content = executedSignatures.has(sig)
         ? contentBySignature.get(sig)
         : {
             completed: false,
             error: true,
-            message: `Too many tool calls in a single turn (${order.length} distinct calls, cap is ${MAX_TOOL_CALLS_PER_TURN}). This call was skipped — issue far fewer tool calls per turn and wait for their results before continuing.`,
+            message: `Too many tool calls in a single turn (${order.length} distinct calls, cap is ${MAX_TOOL_CALLS_PER_TURN}). This call was skipped -- issue far fewer tool calls per turn and wait for their results before continuing.`,
           };
       return { tool_call_id: tc.id, content, forceNextTool: content?.forceNextTool };
     });
 
     if (droppedCount > 0) {
-      this.log(`[BaseExecutor] handleToolCalls: batch had ${order.length} distinct signatures (${toolCalls.length} raw calls) — executed ${executedSignatures.size}, skipped ${droppedCount} over the ${MAX_TOOL_CALLS_PER_TURN} cap`);
+      this.log(`[BaseExecutor] handleToolCalls: batch had ${order.length} distinct signatures (${toolCalls.length} raw calls) -- executed ${executedSignatures.size}, skipped ${droppedCount} over the ${MAX_TOOL_CALLS_PER_TURN} cap`);
     }
 
     return results;

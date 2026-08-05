@@ -608,10 +608,38 @@ describe('handleToolCalls — intra-batch dedup + per-turn cap', () => {
         files: [],
         models: [{ provider: 'anthropic', model: 'claude-sonnet-4-5' }],
         dependencies: [],
-        tools: [{ name: 'fetch_skills', description: 'discover skills', parameters: { type: 'object', properties: { query: { type: 'string' } } } }],
+        tools: [
+          { name: 'fetch_skills', description: 'discover skills', parameters: { type: 'object', properties: { query: { type: 'string' } } } },
+          { name: 'set_count', description: 'set a count', parameters: { type: 'object', properties: { count: { type: 'number' } } } },
+        ],
       },
     } as any);
   }
+
+  it('regression: a call whose args get normalized (mutated) by normalizeToolArgs is NOT misreported as skipped', async () => {
+    // Caught by adversarial review: the dedup signature used to be computed
+    // once up front AND recomputed after execution for the same tc object.
+    // executeOneToolCall mutates tc.args in place via normalizeToolArgs
+    // (string "5" -> number 5 for a number-typed param, an everyday coercion
+    // path, not an edge case) — so the post-execution signature diverged from
+    // the pre-execution one, and a genuinely-executed single call (nowhere
+    // near the 25-call cap) got its real result silently replaced with a
+    // "too many tool calls, skipped" error.
+    let callCount = 0;
+    let receivedCount: any;
+    const router = {
+      set_count: { execute: async (args: any) => { callCount++; receivedCount = args.count; return { completed: true, count: args.count }; } },
+    };
+    const executor = new TestExecutor(makeConfig(fanoutManifest(), { toolRouter: router }));
+    const results = await executor.testHandleToolCalls([
+      { id: 't1', name: 'set_count', args: { count: '5' } }, // string, coerced to number 5 by normalizeToolArgs
+    ]);
+
+    expect(callCount).toBe(1); // the handler genuinely ran
+    expect(receivedCount).toBe(5); // and received the coerced numeric value
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toEqual({ completed: true, count: 5 }); // NOT a "too many tool calls" error
+  });
 
   it('executes an identical (name, args) call only ONCE and fans the same result out to every duplicate tool_call_id', async () => {
     let callCount = 0;
