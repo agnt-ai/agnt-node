@@ -99,7 +99,9 @@ export async function resolveProfile(explicitName?: string): Promise<Profile> {
 
 /**
  * Write (or overwrite) one named profile, creating ~/.agnt/credentials if absent.
- * chmod 600 after write — this file holds a live bearer token.
+ * Written with mode 0o600 from the moment the file is created — this file
+ * holds a live bearer token, so there's no window where a default-umask
+ * write leaves it group/world-readable before a follow-up chmod lands.
  */
 export async function saveProfile(name: string, profile: Profile): Promise<void> {
   const { homedir } = await import('os');
@@ -112,7 +114,10 @@ export async function saveProfile(name: string, profile: Profile): Promise<void>
   const profiles = await readAllProfiles();
   profiles[name] = profile;
 
-  await writeFile(path, serializeCredentials(profiles), 'utf-8');
+  await writeFile(path, serializeCredentials(profiles), { encoding: 'utf-8', mode: 0o600 });
+  // Existing files aren't re-created (no O_CREAT mode applied), so an
+  // overwrite of a profile added before this fix still needs an explicit
+  // chmod to actually narrow its permissions.
   await chmod(path, 0o600);
 }
 
