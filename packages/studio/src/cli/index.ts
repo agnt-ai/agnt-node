@@ -14,7 +14,7 @@ const program = new Command();
 program
   .name('agnt')
   .description('Agnt SDK CLI — manage and run v2 prompt manifests')
-  .version('0.0.46');
+  .version('0.0.47');
 
 program
   .command('init')
