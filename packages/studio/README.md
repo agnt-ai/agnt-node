@@ -1,6 +1,6 @@
 # @agnt-sdk/studio
 
-V2 manifest-native LLM executor for [Agnt](https://agnt.ai) prompts, with a CLI for pulling and running agent manifests locally.
+V2 manifest-native LLM executor for [Agnt](https://agnt.ai) prompts, with a CLI for pulling/running agent manifests locally and for pulling task/chat run detail from the platform for debugging.
 
 ## Installation
 
@@ -54,6 +54,38 @@ Scaffold an `agnt.config.js` in the current directory:
 ```bash
 agnt init
 ```
+
+### `agnt configure` / `agnt run` — pull task/chat run detail from the DB
+
+For debugging what an agent actually did on a task or chat — every tool call and result, not just the message transcript — without tunneling into the database or scraping logs. Uses the standard `/tasks` and `/chats` API, so it needs a real API key, not the project-level `agnt.config.js`.
+
+**Setup — mint an API key, then save it as a named profile** (AWS-CLI style; profiles live in `~/.agnt/credentials`, independent of any project):
+
+```bash
+agnt configure --profile production --api-url https://api.agnt.ai --api-key ak_live_...
+agnt configure --profile staging --api-url https://staging-api.agnt.ai --api-key ak_live_...
+```
+
+Select a profile per command with `--profile`, or set `AGNT_PROFILE` in your shell. Defaults to a profile named `default`.
+
+```bash
+# List recent tasks/chats
+agnt run list --since 24h --profile production
+agnt run list --status active --profile production
+
+# Full activity timeline for one task/chat (tool calls + results, paginates
+# through everything automatically — capped at 1000 activities by default)
+agnt run task <taskId> --profile production
+agnt run chat <chatId> --profile production
+
+# No cap — fetch every activity, however many pages that takes
+agnt run task <taskId> --all --profile production
+
+# Raw JSON for piping into other tools (e.g. `jq`, or Claude Code via Bash)
+agnt run task <taskId> --json --profile production
+```
+
+An account-level API key (one created without a specific `userId`) sees everything in its account. A user-scoped key only sees that one user's own tasks/chats.
 
 ## Programmatic use
 
