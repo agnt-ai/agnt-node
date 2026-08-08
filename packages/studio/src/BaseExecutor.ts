@@ -35,6 +35,17 @@ import { deepWellForm } from './wellFormed.js';
 import { StreamAbortError } from './providers/streaming.js';
 import type { HookRegistry } from './hooks.js';
 
+// A single completion is expected to request a handful of tool calls at once
+// (parallel fan-out is normal — search_memories, fetch_skills, etc. legitimately
+// batch several). It is NEVER expected to request hundreds or thousands in one
+// shot; that shape is always a degenerate/looping completion, not a real plan.
+// This is a hard backstop independent of any per-tool guardrail (which only
+// judges a call's CONTENT, not how many calls arrived in the batch) and
+// independent of the run-level message ceiling (which only notices the
+// overshoot on the NEXT loop iteration, after the whole oversized batch has
+// already been executed and pushed onto the transcript).
+const MAX_TOOL_CALLS_PER_TURN = 25;
+
 export default class BaseExecutor {
   protected manifest: PromptManifestV2;
   protected variables: Record<string, any>;
@@ -965,75 +976,151 @@ export default class BaseExecutor {
     return out ?? workingArgs;
   }
 
-  protected async handleToolCalls(toolCalls: ToolCall[]): Promise<ToolResult[]> {
-    const results: ToolResult[] = [];
+  // Executes exactly one tool call and returns its result content. This is the
+  // per-call body factored out of handleToolCalls so it can be invoked once
+  // per DISTINCT (name, args) signature and fanned out to every duplicate
+  // tool_call_id, rather than once per raw call in the batch.
+  private async executeOneToolCall(tc: ToolCall): Promise<any> {
+    this.log(`[BaseExecutor] Executing tool: ${tc.name}`);
+    let toolResult: any;
 
-    for (const tc of toolCalls) {
-      this.log(`[BaseExecutor] Executing tool: ${tc.name}`);
-      let toolResult: any;
-
-      // Fire before_tool_call hook — can block or modify args
-      if (this.hooks?.has('before_tool_call')) {
-        const hookResult = await this.hooks.fire('before_tool_call', {
-          name: tc.name,
-          args: tc.args,
-          source: tc.source,
-        });
-        if (hookResult?.block) {
-          toolResult = { completed: false, error: true, message: hookResult.reason ?? 'Blocked by hook' };
-          results.push({ tool_call_id: tc.id, content: toolResult });
-          continue;
-        }
-        if (hookResult?.args) {
-          tc.args = hookResult.args;
-        }
+    // Fire before_tool_call hook — can block or modify args
+    if (this.hooks?.has('before_tool_call')) {
+      const hookResult = await this.hooks.fire('before_tool_call', {
+        name: tc.name,
+        args: tc.args,
+        source: tc.source,
+      });
+      if (hookResult?.block) {
+        return { completed: false, error: true, message: hookResult.reason ?? 'Blocked by hook' };
       }
+      if (hookResult?.args) {
+        tc.args = hookResult.args;
+      }
+    }
 
-      // Single normalization point at the direct-call boundary: coerce
-      // stringified array/object args to their schema-declared types so direct
-      // tool calls behave identically to the execute_tool meta-tool path.
-      tc.args = this.normalizeToolArgs(tc.name, tc.args);
+    // Single normalization point at the direct-call boundary: coerce
+    // stringified array/object args to their schema-declared types so direct
+    // tool calls behave identically to the execute_tool meta-tool path.
+    tc.args = this.normalizeToolArgs(tc.name, tc.args);
 
-      if (tc.name === 'finish_agent_run') {
-        const handler = this.toolRouter[tc.name];
-        if (handler) {
-          try {
-            toolResult = await handler.execute(tc.args);
-          } catch (err: any) {
-            toolResult = { completed: false, error: true, message: err.message };
-          }
-        } else {
-          toolResult = tc.args;
+    if (tc.name === 'finish_agent_run') {
+      const handler = this.toolRouter[tc.name];
+      if (handler) {
+        try {
+          toolResult = await handler.execute(tc.args);
+        } catch (err: any) {
+          toolResult = { completed: false, error: true, message: err.message };
         }
       } else {
-        const handler = this.toolRouter[tc.name];
-        if (!handler) {
-          toolResult = { completed: false, error: true, message: `Tool '${tc.name}' not found. Most tools are lazy-loaded — call fetch_tools() with no args to see all groups, or fetch_tools({name: "${tc.name}"}) to check spelling. Then call execute_tool({tool_name, params}) to run it.` };
-        } else {
-          try {
-            toolResult = await handler.execute(tc.args);
-            // Normalize OpenClaw-format results ({ content: [{type, text}] }) to AGNT format
-            toolResult = normalizeToolResult(toolResult);
-            this.toolErrorCount[tc.name] = 0;
-          } catch (err: any) {
-            this.toolErrorCount[tc.name] = (this.toolErrorCount[tc.name] || 0) + 1;
-            if (this.toolErrorCount[tc.name] >= 3) throw err;
-            toolResult = { completed: false, error: true, message: 'Tool error. Please try a different approach.' };
-          }
+        toolResult = tc.args;
+      }
+    } else {
+      const handler = this.toolRouter[tc.name];
+      if (!handler) {
+        toolResult = { completed: false, error: true, message: `Tool '${tc.name}' not found. Most tools are lazy-loaded — call fetch_tools() with no args to see all groups, or fetch_tools({name: "${tc.name}"}) to check spelling. Then call execute_tool({tool_name, params}) to run it.` };
+      } else {
+        try {
+          toolResult = await handler.execute(tc.args);
+          // Normalize OpenClaw-format results ({ content: [{type, text}] }) to AGNT format
+          toolResult = normalizeToolResult(toolResult);
+          this.toolErrorCount[tc.name] = 0;
+        } catch (err: any) {
+          this.toolErrorCount[tc.name] = (this.toolErrorCount[tc.name] || 0) + 1;
+          if (this.toolErrorCount[tc.name] >= 3) throw err;
+          toolResult = { completed: false, error: true, message: 'Tool error. Please try a different approach.' };
         }
       }
+    }
 
-      // Fire after_tool_call hook (observability)
-      if (this.hooks?.has('after_tool_call')) {
-        await this.hooks.fire('after_tool_call', {
-          name: tc.name,
-          args: tc.args,
-          result: toolResult,
-          source: tc.source,
-        });
+    // Fire after_tool_call hook (observability)
+    if (this.hooks?.has('after_tool_call')) {
+      await this.hooks.fire('after_tool_call', {
+        name: tc.name,
+        args: tc.args,
+        result: toolResult,
+        source: tc.source,
+      });
+    }
+
+    return toolResult;
+  }
+
+  protected async handleToolCalls(toolCalls: ToolCall[]): Promise<ToolResult[]> {
+    // ── Structural backstop against a degenerate/looping completion that
+    // requests an implausible number of tool calls in one shot (seen in
+    // production: a single turn emitted 1,618 near-duplicate calls, which
+    // blew a run's context to ~130K tokens before any per-tool guardrail or
+    // the run-level message ceiling could react). Two independent layers:
+    //
+    //  1. DEDUP — calls sharing the same (name, args) signature within this
+    //     one batch are executed ONCE; every duplicate tool_call_id gets the
+    //     same result fanned out. This also closes a latent correctness bug:
+    //     before this change, N identical calls to a side-effectful tool
+    //     (e.g. send_email) in one batch would genuinely fire N times.
+    //  2. CAP — after dedup, only the first MAX_TOOL_CALLS_PER_TURN distinct
+    //     signatures are actually executed; anything beyond that is
+    //     short-circuited with a single clear error per call, no handler
+    //     invocation, no hook firing. Every raw tool_call_id still gets
+    //     exactly one result message (required by the tool-call/tool-result
+    //     API contract), but the number of REAL executions — and therefore
+    //     the transcript growth for this turn — is bounded regardless of how
+    //     many calls the model emitted.
+    // Captured ONCE, before any call executes -- executeOneToolCall mutates
+    // tc.args in place (normalizeToolArgs coercion, before_tool_call hook
+    // rewrites), so recomputing a call's signature AFTER execution would
+    // silently diverge from the value captured here. That divergence used to
+    // make a genuinely-executed, ordinary single call (e.g. a numeric arg
+    // normalized from "5" to 5) get reported back to the model as skipped
+    // over the cap, nowhere near 25 calls -- undermining the whole point of
+    // this cap (a model told its call was "skipped" when it actually ran has
+    // every reason to retry it, causing a real duplicate side effect). A
+    // failure to serialize (e.g. a circular reference in args) falls back to
+    // a per-index unique signature rather than throwing and crashing the
+    // whole batch -- that call simply is not deduped against anything.
+    const signatureOf = (tc: ToolCall, index: number): string => {
+      try {
+        return JSON.stringify({ name: tc.name, args: tc.args ?? {} });
+      } catch {
+        return `__unserializable__:${index}`;
       }
+    };
+    const signatures = toolCalls.map((tc, i) => signatureOf(tc, i));
 
-      results.push({ tool_call_id: tc.id, content: toolResult, forceNextTool: toolResult?.forceNextTool });
+    const firstIndexBySignature = new Map<string, number>();
+    const order: string[] = [];
+    for (let i = 0; i < toolCalls.length; i++) {
+      const sig = signatures[i];
+      if (!firstIndexBySignature.has(sig)) {
+        firstIndexBySignature.set(sig, i);
+        order.push(sig);
+      }
+    }
+
+    const executedSignatures = new Set(order.slice(0, MAX_TOOL_CALLS_PER_TURN));
+    const droppedCount = Math.max(0, order.length - MAX_TOOL_CALLS_PER_TURN);
+
+    const contentBySignature = new Map<string, any>();
+    for (const sig of order) {
+      if (!executedSignatures.has(sig)) continue;
+      const tc = toolCalls[firstIndexBySignature.get(sig)!];
+      contentBySignature.set(sig, await this.executeOneToolCall(tc));
+    }
+
+    const results: ToolResult[] = toolCalls.map((tc, i) => {
+      const sig = signatures[i]; // reuse the captured signature -- never recompute post-mutation
+      const content = executedSignatures.has(sig)
+        ? contentBySignature.get(sig)
+        : {
+            completed: false,
+            error: true,
+            message: `Too many tool calls in a single turn (${order.length} distinct calls, cap is ${MAX_TOOL_CALLS_PER_TURN}). This call was skipped -- issue far fewer tool calls per turn and wait for their results before continuing.`,
+          };
+      return { tool_call_id: tc.id, content, forceNextTool: content?.forceNextTool };
+    });
+
+    if (droppedCount > 0) {
+      this.log(`[BaseExecutor] handleToolCalls: batch had ${order.length} distinct signatures (${toolCalls.length} raw calls) -- executed ${executedSignatures.size}, skipped ${droppedCount} over the ${MAX_TOOL_CALLS_PER_TURN} cap`);
     }
 
     return results;

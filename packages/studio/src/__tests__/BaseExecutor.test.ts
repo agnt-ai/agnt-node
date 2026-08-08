@@ -589,6 +589,138 @@ describe('normalizeToolArgs — wrapped params envelope rescue', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// handleToolCalls — intra-batch dedup + per-turn cap
+//
+// Regression coverage for a production incident: a single completion emitted
+// 1,618 near-duplicate tool_calls (48 distinct signatures repeated up to 82x
+// each), which — with no cap or dedup — meant 1,618 real handler invocations
+// and 1,618 result messages pushed onto the transcript in one turn, ballooning
+// context to ~130K tokens before the run-level message ceiling could react.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('handleToolCalls — intra-batch dedup + per-turn cap', () => {
+  function fanoutManifest() {
+    return makeManifest({
+      spec: {
+        routingStrategy: 'fallback',
+        enableToolCalls: true,
+        variables: [],
+        files: [],
+        models: [{ provider: 'anthropic', model: 'claude-sonnet-4-5' }],
+        dependencies: [],
+        tools: [
+          { name: 'fetch_skills', description: 'discover skills', parameters: { type: 'object', properties: { query: { type: 'string' } } } },
+          { name: 'set_count', description: 'set a count', parameters: { type: 'object', properties: { count: { type: 'number' } } } },
+        ],
+      },
+    } as any);
+  }
+
+  it('regression: a call whose args get normalized (mutated) by normalizeToolArgs is NOT misreported as skipped', async () => {
+    // Caught by adversarial review: the dedup signature used to be computed
+    // once up front AND recomputed after execution for the same tc object.
+    // executeOneToolCall mutates tc.args in place via normalizeToolArgs
+    // (string "5" -> number 5 for a number-typed param, an everyday coercion
+    // path, not an edge case) — so the post-execution signature diverged from
+    // the pre-execution one, and a genuinely-executed single call (nowhere
+    // near the 25-call cap) got its real result silently replaced with a
+    // "too many tool calls, skipped" error.
+    let callCount = 0;
+    let receivedCount: any;
+    const router = {
+      set_count: { execute: async (args: any) => { callCount++; receivedCount = args.count; return { completed: true, count: args.count }; } },
+    };
+    const executor = new TestExecutor(makeConfig(fanoutManifest(), { toolRouter: router }));
+    const results = await executor.testHandleToolCalls([
+      { id: 't1', name: 'set_count', args: { count: '5' } }, // string, coerced to number 5 by normalizeToolArgs
+    ]);
+
+    expect(callCount).toBe(1); // the handler genuinely ran
+    expect(receivedCount).toBe(5); // and received the coerced numeric value
+    expect(results).toHaveLength(1);
+    expect(results[0].content).toEqual({ completed: true, count: 5 }); // NOT a "too many tool calls" error
+  });
+
+  it('executes an identical (name, args) call only ONCE and fans the same result out to every duplicate tool_call_id', async () => {
+    let callCount = 0;
+    const router = {
+      fetch_skills: { execute: async () => { callCount++; return { completed: true, hits: [callCount] }; } },
+    };
+    const executor = new TestExecutor(makeConfig(fanoutManifest(), { toolRouter: router }));
+    const results = await executor.testHandleToolCalls([
+      { id: 't1', name: 'fetch_skills', args: { query: 'scheduling' } },
+      { id: 't2', name: 'fetch_skills', args: { query: 'scheduling' } },
+      { id: 't3', name: 'fetch_skills', args: { query: 'scheduling' } },
+    ]);
+
+    expect(callCount).toBe(1); // the handler only actually ran once
+    expect(results).toHaveLength(3); // but every tool_call_id still got a result
+    expect(results.map(r => r.tool_call_id)).toEqual(['t1', 't2', 't3']);
+    expect(results[0].content).toEqual({ completed: true, hits: [1] });
+    expect(results[1].content).toEqual(results[0].content); // duplicate fanned out, not re-run
+    expect(results[2].content).toEqual(results[0].content);
+  });
+
+  it('still executes calls with genuinely different args independently', async () => {
+    const seen: string[] = [];
+    const router = {
+      fetch_skills: { execute: async (args: any) => { seen.push(args.query); return { completed: true, query: args.query }; } },
+    };
+    const executor = new TestExecutor(makeConfig(fanoutManifest(), { toolRouter: router }));
+    const results = await executor.testHandleToolCalls([
+      { id: 't1', name: 'fetch_skills', args: { query: 'scheduling' } },
+      { id: 't2', name: 'fetch_skills', args: { query: 'companies' } },
+    ]);
+
+    expect(seen).toEqual(['scheduling', 'companies']);
+    expect(results[0].content).toEqual({ completed: true, query: 'scheduling' });
+    expect(results[1].content).toEqual({ completed: true, query: 'companies' });
+  });
+
+  it('caps execution at MAX_TOOL_CALLS_PER_TURN distinct signatures — the reproduction of the incident shape', async () => {
+    let callCount = 0;
+    const router = {
+      fetch_skills: { execute: async () => { callCount++; return { completed: true }; } },
+    };
+    const executor = new TestExecutor(makeConfig(fanoutManifest(), { toolRouter: router }));
+
+    // 48 distinct queries, each repeated ~34x = 1,632 raw calls — mirrors the incident.
+    const queries = Array.from({ length: 48 }, (_, i) => `topic-${i}`);
+    const toolCalls: any[] = [];
+    let id = 0;
+    for (let rep = 0; rep < 34; rep++) {
+      for (const q of queries) {
+        toolCalls.push({ id: `t${id++}`, name: 'fetch_skills', args: { query: q } });
+      }
+    }
+
+    const results = await executor.testHandleToolCalls(toolCalls);
+
+    expect(toolCalls.length).toBeGreaterThan(1600); // sanity: reproduces the incident's raw volume
+    expect(callCount).toBe(25); // real handler invocations bounded by the cap, not the 48 distinct queries or 1,632 raw calls
+    expect(results).toHaveLength(toolCalls.length); // every tool_call_id still gets exactly one result message
+    const skipped = results.filter(r => r.content?.error === true);
+    expect(skipped.length).toBeGreaterThan(0);
+    expect(skipped[0].content.message).toMatch(/too many tool calls/i);
+  });
+
+  it('does not execute a call beyond the cap even once (cap enforced BEFORE execution, not after)', async () => {
+    const executed: string[] = [];
+    const router = {
+      fetch_skills: { execute: async (args: any) => { executed.push(args.query); return { completed: true }; } },
+    };
+    const executor = new TestExecutor(makeConfig(fanoutManifest(), { toolRouter: router }));
+    const toolCalls = Array.from({ length: 30 }, (_, i) => ({ id: `t${i}`, name: 'fetch_skills', args: { query: `q${i}` } }));
+
+    await executor.testHandleToolCalls(toolCalls);
+
+    expect(executed).toHaveLength(25);
+    expect(executed).not.toContain('q25'); // the 26th distinct call was skipped, never executed
+    expect(executed).not.toContain('q29');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // isRetryableError — transient-fault classification for model fallback
 // ─────────────────────────────────────────────────────────────────────────────
 
