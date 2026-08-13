@@ -401,15 +401,68 @@ export default class BaseExecutor {
   }
 
   /**
+   * invokeWithFallback calls this — NOT isRetryableError — to decide whether
+   * a model that just failed should be followed by the next model in the
+   * account's configured chain (spec.models, ordered by fallbackOrder; see
+   * the Models page in console). Deliberately permissive: that chain exists
+   * precisely so a provider that's down, misconfigured, or out of credits
+   * doesn't take the whole run down — "we have backups for exactly this
+   * reason" — so the default is yes, fall back, for any reason. The only
+   * carve-out is a genuine user-initiated stop (or a stream that already
+   * burned the absolute time ceiling): spinning up more provider calls after
+   * the caller asked to stop, or after already spending the maximum allowed
+   * time on one model, would ignore that signal rather than serve it.
+   *
+   * This is intentionally a SEPARATE, broader check from isRetryableError,
+   * which stays narrow (network blips, overload, rate limits) because it
+   * also gates each provider adapter's OWN same-provider SDK retry (see
+   * streamWithRetry usage in openai.ts/anthropic.ts/google.ts/etc.) —
+   * hammering the SAME dead account a few more times before ever reaching a
+   * genuinely different provider just adds latency for an error that
+   * account isn't going to stop having. isFallbackEligible only decides
+   * whether to advance to a DIFFERENT model/account, where that concern
+   * doesn't apply.
+   *
+   * 2026-08-13 prod incident: OpenAI org ran out of credits, every gpt-5.6
+   * call died, and Claude/Kimi were configured as fallbacks 2 and 3 in the
+   * account's own strategy — but isRetryableError (an allowlist of known
+   * transient-error shapes) didn't recognize the error, so invokeWithFallback
+   * threw on the first model instead of hopping. An allowlist is whack-a-mole
+   * by construction — the next outage will just be a differently-shaped
+   * error from a different provider. This flips the default instead.
+   *
+   * NOTE on the carve-out's reliability: it is keyed on the TYPED
+   * StreamAbortError, which is only trustworthy because streamWithRetry now
+   * mints it from the guard's own `reason()` rather than from the shape of
+   * the SDK's error (see providers/streaming.ts). Before that, the OpenAI
+   * path surfaced a plain Error on abort and both carve-outs below were
+   * unreachable on the platform's primary models. The redundant, shape-
+   * independent `cancelled`/`signal.aborted` check in invokeWithFallback's
+   * catch is the belt to this braces.
+   *
+   * Deliberately NOT using the looser isAbortError() message-sniffing
+   * predicate here: it matches /\baborted\b/ on the message, which a
+   * SERVER-side connection abort also satisfies — and that is a transient
+   * fault we specifically DO want to fall back on. A false positive here
+   * silently disables the backup chain, which is the exact failure this
+   * change exists to remove, so this carve-out stays narrow and typed.
+   */
+  protected isFallbackEligible(error: any): boolean {
+    if (error instanceof StreamAbortError) return error.reason === 'idle';
+    return true;
+  }
+
+  /**
    * Invoke with automatic model fallback.
    *
-   * Tries models in fallbackOrder. On a retryable error (5xx, overloaded, rate
-   * limit, network drop) it switches to the next model in the list and retries.
-   * Same-provider fallback (e.g. claude-opus → claude-sonnet) reuses this client
-   * by pointing this.model at the next model. Cross-provider fallback (e.g.
-   * claude-opus → gpt-5) can't reuse the client — it spawns a provider-correct
-   * executor via the injected executorFactory and delegates the single invoke.
-   * Non-retryable errors (4xx auth/validation) are re-thrown immediately.
+   * Tries models in fallbackOrder. On any failure of a model — except a
+   * genuine user-initiated stop or a stream that hit its absolute time
+   * ceiling, see isFallbackEligible — it switches to the next model in the
+   * list and retries. Same-provider fallback (e.g. claude-opus → claude-
+   * sonnet) reuses this client by pointing this.model at the next model.
+   * Cross-provider fallback (e.g. claude-opus → gpt-5) can't reuse the
+   * client — it spawns a provider-correct executor via the injected
+   * executorFactory and delegates the single invoke.
    *
    * Known limitation: this.modelPricing is resolved once, for the primary
    * model, before any fallback happens (see AgntExecutor.resolveModelPricing).
@@ -451,6 +504,7 @@ export default class BaseExecutor {
     );
 
     let lastError: any;
+    const failures: Array<{ model: string; error: any }> = [];
 
     for (let i = 0; i < orderedModels.length; i++) {
       const modelConfig = orderedModels[i];
@@ -499,8 +553,19 @@ export default class BaseExecutor {
         }
         return await this.invoke(messages, options);
       } catch (error: any) {
-        if (this.isRetryableError(error)) {
-          this.log(`[BaseExecutor] ${modelConfig.model} retryable error: ${error.message}`);
+        // Shape-independent stop check, ahead of any error classification.
+        // isFallbackEligible can only recognise a stop that arrived wearing
+        // the typed StreamAbortError brand; this asks the question directly —
+        // did WE ask to stop? — so a provider that reports an abort in some
+        // shape we've never seen (or, like bedrock.ts, never wires the signal
+        // and returns normally) still can't cause the chain to fan out after
+        // a cancel. Walking the remaining models here would issue a real,
+        // billed request per fallback for work the caller already abandoned.
+        if (this.cancelled || options.signal?.aborted) throw error;
+
+        if (this.isFallbackEligible(error)) {
+          this.log(`[BaseExecutor] ${modelConfig.model} failed (${error?.message ?? error}) — trying next model`);
+          failures.push({ model: modelConfig.model, error });
           lastError = error;
           continue;
         }
@@ -508,6 +573,19 @@ export default class BaseExecutor {
       }
     }
 
+    // Every model failed. Surface the LAST error (preserving the existing
+    // throw contract and its stack) but repair the diagnostic: overwriting
+    // lastError each hop means an operator reading the run only ever sees the
+    // final model's complaint. In the 2026-08-13 incident that would have
+    // surfaced Kimi's error while the actual cause — "You have no credits
+    // remaining" on the OpenAI primary — was discarded, sending exactly the
+    // wrong signal to whoever is triaging. Attach the full per-model trail so
+    // the root cause survives, without changing what callers catch.
+    if (lastError && failures.length > 1) {
+      const trail = failures.map(f => `${f.model}: ${f.error?.message ?? f.error}`).join(' | ');
+      lastError.fallbackTrail = failures;
+      lastError.message = `${lastError.message} [all ${failures.length} models failed — ${trail}]`;
+    }
     throw lastError ?? new Error('[BaseExecutor] All models in the fallback list failed');
   }
 

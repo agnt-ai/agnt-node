@@ -97,9 +97,16 @@ export default class BedrockExecutor extends BaseExecutor {
       tools: params.toolConfig?.tools?.length || 0
     });
 
-    // Call Bedrock Converse API
+    // Call Bedrock Converse API.
+    //
+    // `abortSignal` is threaded so a cancelled run actually stops here. This
+    // adapter is the one provider that does not stream through
+    // streamWithRetry, so without it `cancel()` had no effect at all: the
+    // request ran to completion and returned a normal success, which
+    // invokeWithFallback would then accept and bill for work the caller had
+    // already abandoned.
     const command = new ConverseCommand(params);
-    const response = await this.client.send(command);
+    const response = await this.client.send(command, { abortSignal: options.signal });
 
     // Format response to match expected structure
     const output = response.output;

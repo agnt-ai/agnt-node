@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import BaseExecutor from '../BaseExecutor.js';
+import { StreamAbortError } from '../providers/streaming.js';
 import type { BaseExecutorConfig, PromptManifestV2 } from '../types.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -640,6 +641,69 @@ describe('isRetryableError — transient faults retry, client errors do not', ()
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// isFallbackEligible — the (separate, broader) gate on invokeWithFallback's
+// cross-model loop. isRetryableError above also gates each provider adapter's
+// OWN same-provider SDK retry, so it stays a narrow allowlist of known
+// transient shapes. This one decides whether to advance to a DIFFERENT model
+// in the account's configured chain, where "the account is out of credits" or
+// "this provider doesn't support X" are exactly the cases worth trying a
+// different provider for — so the default is permissive, not an allowlist.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('isFallbackEligible — default to falling back, for any reason', () => {
+  const ex = () => new TestExecutor(makeConfig(makeManifest())) as any;
+
+  // 2026-08-13 prod incident: OpenAI org ran out of credits, every gpt-5.6
+  // call died, and Claude/Kimi were configured as fallbacks 2 and 3 but never
+  // got tried — isRetryableError (an allowlist) didn't recognize this error
+  // shape. Billing/quota exhaustion is account-level: a different provider
+  // has a completely separate billing account, so it's exactly the class of
+  // error most worth a cross-provider hop for.
+  it('falls back on account-level billing/quota exhaustion, any provider, any status shape', () => {
+    const e = ex();
+    expect(e.isFallbackEligible(new Error(
+      'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.'
+    ))).toBe(true);
+    expect(e.isFallbackEligible(Object.assign(new Error('quota'), { code: 'insufficient_quota' }))).toBe(true);
+    expect(e.isFallbackEligible(Object.assign(new Error('Your credit balance is too low to access the API.'), { status: 400 }))).toBe(true);
+  });
+
+  it('falls back on a plain 4xx too — a different provider is a different failure domain', () => {
+    // Old behavior treated any 4xx as permanent and rethrew immediately. The
+    // new default: if THIS model can't run, try the next one — even a request
+    // that's malformed for provider A isn't guaranteed to be malformed for
+    // provider B, and the cost of finding out is a few extra seconds, not a
+    // parked task.
+    const e = ex();
+    for (const status of [400, 401, 403, 404, 422]) {
+      expect(e.isFallbackEligible({ status }), `status ${status}`).toBe(true);
+    }
+  });
+
+  it('falls back on literally any other error shape', () => {
+    expect(ex().isFallbackEligible(new Error('something nobody has seen before'))).toBe(true);
+    expect(ex().isFallbackEligible('a bare string, not even an Error')).toBe(true);
+    expect(ex().isFallbackEligible(undefined)).toBe(true);
+  });
+
+  it('does NOT fall back on a user-initiated stop or external abort', () => {
+    // The caller asked to stop — spinning up more provider calls would ignore
+    // that signal, not serve it.
+    expect(ex().isFallbackEligible(new StreamAbortError('external', 'aborted'))).toBe(false);
+  });
+
+  it('does NOT fall back once a stream already burned its absolute time ceiling', () => {
+    // Retrying a dribbling-to-the-backstop stream across every configured
+    // model would multiply the worst-case latency by the length of the chain.
+    expect(ex().isFallbackEligible(new StreamAbortError('backstop', 'hit ceiling'))).toBe(false);
+  });
+
+  it('DOES fall back on an idle stall — a different model may not stall the same way', () => {
+    expect(ex().isFallbackEligible(new StreamAbortError('idle', 'stalled'))).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // invokeWithFallback — a 529 composes through the model-fallback loop
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -674,7 +738,11 @@ describe('invokeWithFallback — transient 529 behavior', () => {
     expect(ex.invoke).toHaveBeenCalledTimes(1);
   });
 
-  it('a non-retryable 4xx rethrows immediately without trying the next model', async () => {
+  it('a 4xx now falls back to the next model too, instead of rethrowing immediately', async () => {
+    // Old contract: a 4xx was treated as permanent and rethrown without
+    // trying the fallback model. New contract (see isFallbackEligible): if
+    // this model can't run, for any reason, try the next one — a request
+    // that's a 400 against provider A isn't guaranteed to fail on provider B.
     const manifest = makeManifest({
       spec: { ...makeManifest().spec, models: [
         { provider: 'anthropic', model: 'primary',  fallbackOrder: 0 },
@@ -682,10 +750,45 @@ describe('invokeWithFallback — transient 529 behavior', () => {
       ] },
     });
     const ex = new TestExecutor(makeConfig(manifest)) as any;
-    ex.invoke = vi.fn().mockRejectedValue(Object.assign(new Error('bad request'), { status: 400 }));
+    ex.invoke = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 400 }))
+      .mockResolvedValueOnce({ message: { role: 'assistant', content: 'ok' }, usage: {} });
+
+    const result = await ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {});
+    expect(result.message.content).toBe('ok');
+    expect(ex.invoke).toHaveBeenCalledTimes(2);
+    expect(ex.model).toBe('fallback');
+  });
+
+  it('once every model in the chain fails, the last error still surfaces (no infinite loop)', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'primary',  fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'fallback', fallbackOrder: 1 },
+      ] },
+    });
+    const ex = new TestExecutor(makeConfig(manifest)) as any;
+    ex.invoke = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('bad request on primary'), { status: 400 }))
+      .mockRejectedValueOnce(Object.assign(new Error('bad request on fallback too'), { status: 400 }));
 
     await expect(ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {}))
-      .rejects.toThrow('bad request');
+      .rejects.toThrow('bad request on fallback too');
+    expect(ex.invoke).toHaveBeenCalledTimes(2); // tried both, then gave up
+  });
+
+  it('a user-initiated abort still rethrows immediately without trying the next model', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'primary',  fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'fallback', fallbackOrder: 1 },
+      ] },
+    });
+    const ex = new TestExecutor(makeConfig(manifest)) as any;
+    ex.invoke = vi.fn().mockRejectedValue(new StreamAbortError('external', 'aborted'));
+
+    await expect(ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {}))
+      .rejects.toThrow('aborted');
     expect(ex.invoke).toHaveBeenCalledTimes(1); // did NOT try the fallback model
   });
 });
@@ -839,6 +942,128 @@ describe('invokeWithFallback — cross-provider fallback', () => {
     await expect(ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {}))
       .rejects.toThrow('Request timed out.');
     expect(ex.invoke).toHaveBeenCalledTimes(1); // openai hop skipped, not delegated
+  });
+
+  // Reproduces the 2026-08-13 prod incident end to end: gpt-5.6-terra primary,
+  // claude-sonnet-5 and kimi-k3 configured as fallbacks — exactly the
+  // account's real "medium" tier. Before the isRetryableError fix, this threw
+  // on the first model and never reached the factory.
+  it('hops to the next provider when the primary dies on account-level billing exhaustion', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'openai',    model: 'gpt-5.6-terra', fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'claude-sonnet-5', fallbackOrder: 1 },
+        { provider: 'moonshot',  model: 'kimi-k3',         fallbackOrder: 2 },
+      ] },
+    });
+    const subInvoke = vi.fn().mockResolvedValue({
+      message: { role: 'assistant', content: 'from claude' }, usage: {},
+    });
+    const executorFactory = vi.fn().mockResolvedValue({ invoke: subInvoke });
+
+    const ex = new TestExecutor(makeConfig(manifest, { executorFactory })) as any;
+    ex.invoke = vi.fn().mockRejectedValue(new Error(
+      'You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.'
+    ));
+
+    const signal = new AbortController().signal;
+    const tools = [{ name: 'search' }] as any;
+    const result = await ex.invokeWithFallback(
+      [{ role: 'user', content: 'hi' }],
+      { tools, tool_choice: 'auto', signal },
+    );
+
+    expect(result.message.content).toBe('from claude');
+    expect(ex.invoke).toHaveBeenCalledTimes(1); // openai only, no client to reuse
+    expect(executorFactory).toHaveBeenCalledTimes(1); // hopped straight to anthropic
+    expect(ex.provider).toBe('anthropic');
+    expect(ex.model).toBe('claude-sonnet-5');
+    // Assert WHICH model the factory was actually asked to build. ex.provider/
+    // ex.model above are the loop's own bookkeeping — they'd report
+    // claude-sonnet-5 even if the hop had delegated to the wrong entry, so
+    // without this the test passes while silently skipping a fallback tier.
+    expect(executorFactory.mock.calls[0][0].manifest.spec.models).toEqual([
+      { provider: 'anthropic', model: 'claude-sonnet-5', fallbackOrder: 1 },
+    ]);
+    // The sub-executor must receive the SAME options. Dropping them here
+    // would silently strip tools from every fallback turn, and drop `signal`
+    // so cancel() could no longer interrupt a fallback provider.
+    expect(subInvoke).toHaveBeenCalledTimes(1);
+    const [subMessages, subOptions] = subInvoke.mock.calls[0];
+    expect(subMessages).toEqual([{ role: 'user', content: 'hi' }]);
+    expect(subOptions.tools).toBe(tools);
+    expect(subOptions.tool_choice).toBe('auto');
+    expect(subOptions.signal).toBe(signal);
+  });
+
+  it('does not walk the chain after cancel(), even if the provider error is not abort-shaped', async () => {
+    // bedrock.ts returns normally on abort and the OpenAI SDK swallows it into
+    // a plain Error, so the typed StreamAbortError carve-out cannot be the only
+    // defense. Post-cancel, a plain error must NOT fan out across the chain —
+    // each hop would be a real, billed request for abandoned work.
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'openai',    model: 'gpt-5.6-terra',   fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'claude-sonnet-5', fallbackOrder: 1 },
+      ] },
+    });
+    const executorFactory = vi.fn().mockResolvedValue({
+      invoke: vi.fn().mockResolvedValue({ message: { role: 'assistant', content: 'nope' }, usage: {} }),
+    });
+    const ex = new TestExecutor(makeConfig(manifest, { executorFactory })) as any;
+    ex.invoke = vi.fn().mockImplementation(async () => {
+      ex.cancel(); // user pressed stop mid-flight
+      throw new Error('[responses] stream ended without a terminal response event');
+    });
+
+    await expect(ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {}))
+      .rejects.toThrow('stream ended without a terminal response event');
+    expect(executorFactory).not.toHaveBeenCalled(); // no billed fallback request
+  });
+
+  it('an aborted options.signal also stops the chain regardless of error shape', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'openai',    model: 'gpt-5.6-terra',   fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'claude-sonnet-5', fallbackOrder: 1 },
+      ] },
+    });
+    const executorFactory = vi.fn().mockResolvedValue({
+      invoke: vi.fn().mockResolvedValue({ message: { role: 'assistant', content: 'nope' }, usage: {} }),
+    });
+    const ex = new TestExecutor(makeConfig(manifest, { executorFactory })) as any;
+    const controller = new AbortController();
+    ex.invoke = vi.fn().mockImplementation(async () => {
+      controller.abort();
+      throw new Error('some unbranded provider failure');
+    });
+
+    await expect(ex.invokeWithFallback(
+      [{ role: 'user', content: 'hi' }],
+      { signal: controller.signal },
+    )).rejects.toThrow('some unbranded provider failure');
+    expect(executorFactory).not.toHaveBeenCalled();
+  });
+
+  it('when every model fails, the surfaced error retains the ROOT cause, not just the last', async () => {
+    // Incident-shaped: the real cause is the primary's billing error, but
+    // lastError is overwritten each hop. An operator triaging the run must
+    // still be able to see what actually started it.
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'primary',  fallbackOrder: 0 },
+        { provider: 'anthropic', model: 'fallback', fallbackOrder: 1 },
+      ] },
+    });
+    const ex = new TestExecutor(makeConfig(manifest)) as any;
+    ex.invoke = vi.fn()
+      .mockRejectedValueOnce(new Error('You have no credits remaining.'))
+      .mockRejectedValueOnce(new Error('upstream 503'));
+
+    const err = await ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {}).catch((e: any) => e);
+    expect(err.message).toContain('upstream 503');            // last error still surfaces
+    expect(err.message).toContain('You have no credits remaining.'); // root cause preserved
+    expect(err.fallbackTrail.map((f: any) => f.model)).toEqual(['primary', 'fallback']);
   });
 });
 
