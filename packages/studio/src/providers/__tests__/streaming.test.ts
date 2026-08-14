@@ -30,6 +30,22 @@ function abortsOnGuard(guard: { signal: AbortSignal }): Promise<never> {
   });
 }
 
+/**
+ * An attempt that, on abort, rejects with an error that looks NOTHING like an
+ * abort — which is what the OpenAI path actually does. The OpenAI SDK catches
+ * AbortError internally and returns from the iterator, so the Responses
+ * consumer downstream just sees a stream that ended early and throws a plain
+ * "stream ended without a terminal response event". Nothing on that error
+ * says "abort".
+ */
+function abortsOnGuardUnbranded(guard: { signal: AbortSignal }): Promise<never> {
+  return new Promise((_, reject) => {
+    const fail = () => reject(new Error('[responses] stream ended without a terminal response event'));
+    if (guard.signal.aborted) { fail(); return; }
+    guard.signal.addEventListener('abort', fail, { once: true });
+  });
+}
+
 describe('createStreamGuard', () => {
   it('aborts with reason "idle" when no token arrives within the idle window', async () => {
     const g = createStreamGuard({ idleTimeoutMs: 30, backstopMs: 10_000 });
@@ -159,6 +175,64 @@ describe('streamWithRetry', () => {
     ).catch((e) => e);
     expect(attempts).toBe(1);
     expect((err as any).status).toBe(400);
+  });
+
+  // The OpenAI SDK swallows aborts, so the error reaching this mapper carries
+  // no abort marker at all. Keying the mapping on the SDK's error shape (the
+  // old `reason && isAbortError(err)`) therefore dropped it on the entire
+  // OpenAI path: a backstop stopped being terminal and got retried in place,
+  // and BaseExecutor saw a plain Error it would walk the whole model chain on.
+  // The guard's own reason() is the trustworthy signal.
+  it('maps a guard abort even when the SDK error is not abort-shaped (OpenAI swallows it)', async () => {
+    let attempts = 0;
+    const err = await streamWithRetry(
+      (guard) => { attempts++; return abortsOnGuardUnbranded(guard); },
+      { maxRetries: 3, idleTimeoutMs: 10_000, backstopMs: 20 }
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(StreamAbortError);
+    expect((err as StreamAbortError).reason).toBe('backstop');
+    expect(attempts).toBe(1); // terminal — NOT retried in place
+    // The underlying fault is preserved rather than discarded.
+    expect((err as any).cause?.message).toContain('stream ended without a terminal response event');
+  });
+
+  it('an unbranded external abort is still terminal, not retried', async () => {
+    const ext = new AbortController();
+    let attempts = 0;
+    const err = await streamWithRetry(
+      (guard) => {
+        attempts++;
+        setTimeout(() => ext.abort(), 10);
+        return abortsOnGuardUnbranded(guard);
+      },
+      { maxRetries: 3, idleTimeoutMs: 10_000, backstopMs: 10_000, externalSignal: ext.signal }
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(StreamAbortError);
+    expect((err as StreamAbortError).reason).toBe('external');
+    expect(attempts).toBe(1);
+  });
+
+  it('an unbranded idle stall still retries in place (mapping did not over-reach)', async () => {
+    // Guards the other direction: the unconditional mapping must not turn a
+    // retryable idle stall into something terminal.
+    let attempts = 0;
+    const err = await streamWithRetry(
+      (guard) => { attempts++; return abortsOnGuardUnbranded(guard); },
+      { maxRetries: 3, idleTimeoutMs: 20, backstopMs: 10_000 }
+    ).catch((e) => e);
+    expect(attempts).toBe(3);
+    expect((err as StreamAbortError).reason).toBe('idle');
+  });
+
+  it('leaves a genuine non-abort error untouched when the guard never fired', async () => {
+    // No guard abort ⇒ reason() is null ⇒ the real error must pass through
+    // unwrapped, so callers can still classify it (status codes etc.).
+    const err = await streamWithRetry(
+      async () => { throw Object.assign(new Error('boom'), { status: 500 }); },
+      { maxRetries: 1, idleTimeoutMs: 10_000, backstopMs: 10_000 }
+    ).catch((e) => e);
+    expect(err).not.toBeInstanceOf(StreamAbortError);
+    expect((err as any).status).toBe(500);
   });
 
   it('a slow-but-progressing attempt (bumps within idle) does NOT time out', async () => {

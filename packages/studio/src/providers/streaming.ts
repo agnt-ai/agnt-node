@@ -174,11 +174,37 @@ export async function streamWithRetry<T>(
       return await attempt(guard);
     } catch (err: any) {
       // Map a guard-triggered abort to a typed error carrying its reason.
+      //
+      // Keyed on the GUARD's own record that it fired, NOT on the shape of the
+      // error the SDK happened to throw. Provider SDKs do not agree on what an
+      // aborted stream looks like: Anthropic throws APIUserAbortError and
+      // Google throws GoogleGenerativeAIAbortError (both match isAbortError),
+      // but the OpenAI SDK SWALLOWS the abort — it catches AbortError and
+      // returns from the iterator (openai/src/streaming.ts), so the Responses
+      // consumer downstream sees a truncated stream and throws a plain
+      // "stream ended without a terminal response event" Error that
+      // isAbortError does not match.
+      //
+      // That made the old `reason && isAbortError(err)` conjunct silently drop
+      // the mapping on the entire OpenAI path — the platform's primary models.
+      // Downstream, both consumers of `reason` then behaved as if a deliberate
+      // abort were an ordinary failure: the terminal check below let a
+      // backstop/external abort be retried in place, and BaseExecutor's
+      // isFallbackEligible let it walk the whole model-fallback chain (3
+      // models x a 10-minute backstop = 30 min, well past the worker's 14-min
+      // checkpoint — a bounded failure turned into a killed run).
+      //
+      // Once the guard has aborted, the request is being torn down, so any
+      // error surfacing from that attempt is a consequence of the abort;
+      // `reason` alone is the trustworthy signal. The original error is kept
+      // as `cause` so the underlying fault is never lost for debugging.
       const reason = guard.reason();
-      const mapped =
-        reason && isAbortError(err)
-          ? new StreamAbortError(reason, `[streaming] stream aborted: ${reason}`)
-          : err;
+      const mapped = reason
+        ? Object.assign(
+            new StreamAbortError(reason, `[streaming] stream aborted: ${reason}`),
+            { cause: err }
+          )
+        : err;
       lastError = mapped;
 
       // Terminal: the caller asked to stop, or the stream dribbled to the
