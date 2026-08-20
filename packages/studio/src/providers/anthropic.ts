@@ -25,6 +25,41 @@ const ANTHROPIC_REASONING_FAMILY = /^claude-(opus-4-8|opus-4-7|sonnet-5|fable-5|
 /** Legacy sampling knobs the reasoning family rejects (400) alongside adaptive thinking. */
 const ANTHROPIC_REASONING_UNSUPPORTED_PARAMS = ['temperature', 'top_p', 'top_k', 'budget_tokens'];
 
+/**
+ * Older Claude models carved out of ANTHROPIC_REASONING_FAMILY above (see its
+ * comment) that still support extended thinking, but only via the legacy
+ * `thinking: {type:'enabled', budget_tokens:N}` form — no adaptive thinking,
+ * no `output_config.effort`. Left unset, these models run with thinking fully
+ * OFF, which (per Anthropic's own docs) makes them more prone to writing a
+ * tool call into visible text/tool-argument strings instead of a real
+ * `tool_use` block. Confirmed live 2026-08-20: a workflow-mode claude-haiku-4-5
+ * run leaked a `finish_agent_run` call as pseudo-XML text twice in one run,
+ * burning 3 extra turns before a hard safety-gate intervened.
+ */
+const ANTHROPIC_LEGACY_THINKING_FAMILY = /^claude-(haiku-4-5|sonnet-4-5|opus-4-6|opus-4-5)(-|$)/i;
+
+/** reasoning_effort tier -> target legacy thinking budget_tokens, before
+ * clamping to this request's max_tokens. Mirrors the tier names accepted by
+ * output_config.effort (low/medium/high/xhigh/max) for the reasoning family. */
+const LEGACY_THINKING_BUDGET_BY_EFFORT: Record<string, number> = {
+  low: 2048,
+  medium: 4096,
+  high: 8192,
+  xhigh: 16384,
+  max: 32768,
+};
+const LEGACY_THINKING_BUDGET_DEFAULT = 4096;
+/** Anthropic's own floor for budget_tokens. */
+const LEGACY_THINKING_MIN_BUDGET = 1024;
+/** Reserve this many max_tokens for the actual answer after thinking — budget_tokens must be strictly less than max_tokens. */
+const LEGACY_THINKING_OUTPUT_HEADROOM = 1024;
+
+/** Leaked pseudo-XML tool-call syntax (`<function_calls><invoke name="...">`)
+ * that some models occasionally emit instead of a real tool_use block —
+ * observed both in top-level visible text and, more often in practice, stuffed
+ * inside a string-valued argument of an otherwise-real tool call. */
+const LEAKED_TOOL_CALL_PATTERN = /<function_calls>[\s\S]*?<invoke\s+name=["']/i;
+
 export default class AnthropicExecutor extends BaseExecutor {
   private client: Anthropic;
 
@@ -183,11 +218,15 @@ export default class AnthropicExecutor extends BaseExecutor {
       (b: any) => b?.type === 'thinking' || b?.type === 'redacted_thinking'
     );
 
+    const extractedText = this.#extractTextContent(response.content);
+    const extractedToolCalls = this.#extractToolCalls(response.content);
+    this.#warnIfLeakedToolCall(extractedText, extractedToolCalls);
+
     return {
       message: {
         role: 'assistant',
-        content: this.#extractTextContent(response.content),
-        tool_calls: this.#extractToolCalls(response.content),
+        content: extractedText,
+        tool_calls: extractedToolCalls,
         ...(reasoningBlocks.length ? { rawParts: reasoningBlocks } : {})
       },
       usage: {
@@ -476,6 +515,41 @@ export default class AnthropicExecutor extends BaseExecutor {
   }
 
   /**
+   * Defensive observability for a known model failure mode: some models
+   * occasionally write a tool call into visible text, or into a string-valued
+   * argument of an otherwise-real tool call, as legacy pseudo-XML
+   * (`<function_calls><invoke name="...">`) instead of a proper `tool_use`
+   * block. The call never executes and nothing else surfaces this — it
+   * silently wastes a turn (see `ANTHROPIC_LEGACY_THINKING_FAMILY` above for
+   * the observed case and mitigation). This does NOT parse or recover the
+   * leaked call — arbitrary XML parsing of untrusted model output shaped as a
+   * tool call is its own injection-surface concern — it only logs so the
+   * failure is visible in CloudWatch instead of only discoverable by reading a
+   * full trace by hand.
+   */
+  #warnIfLeakedToolCall(text: string, toolCalls: any[]): void {
+    let leaked: string | null = null;
+
+    if (text && LEAKED_TOOL_CALL_PATTERN.test(text)) {
+      leaked = text;
+    } else {
+      for (const call of toolCalls) {
+        for (const value of Object.values(call?.args || {})) {
+          if (typeof value === 'string' && LEAKED_TOOL_CALL_PATTERN.test(value)) {
+            leaked = value;
+            break;
+          }
+        }
+        if (leaked) break;
+      }
+    }
+
+    if (leaked) {
+      this.log(`[AnthropicExecutor] Detected leaked tool call in model output — model: ${this.model}, likely a thinking-disabled tool-call-leak. Leaked text (truncated): ${leaked.slice(0, 500)}`);
+    }
+  }
+
+  /**
    * Extract provider-specific parameters from model config
    * Excludes displayName, passes rest to Anthropic API
    */
@@ -504,17 +578,36 @@ export default class AnthropicExecutor extends BaseExecutor {
 
     if (!effort) return;
 
-    if (!ANTHROPIC_REASONING_FAMILY.test(this.model || '')) {
-      // e.g. Haiku 4.5 / Sonnet 4.5 — effort + adaptive thinking are rejected
-      // there. Drop rather than send a request we know will 400.
-      this.log(`[AnthropicExecutor] reasoning_effort ignored — ${this.model} is not a reasoning-family model`);
+    if (ANTHROPIC_REASONING_FAMILY.test(this.model || '')) {
+      params.thinking = { type: 'adaptive' };
+      params.output_config = { ...(params.output_config || {}), effort };
+      for (const key of ANTHROPIC_REASONING_UNSUPPORTED_PARAMS) {
+        delete params[key];
+      }
       return;
     }
 
-    params.thinking = { type: 'adaptive' };
-    params.output_config = { ...(params.output_config || {}), effort };
-    for (const key of ANTHROPIC_REASONING_UNSUPPORTED_PARAMS) {
-      delete params[key];
+    if (ANTHROPIC_LEGACY_THINKING_FAMILY.test(this.model || '')) {
+      // No adaptive thinking / output_config.effort here — sampling params
+      // (temperature/top_p/top_k) stay untouched, they're allowed alongside
+      // legacy thinking on these models.
+      const maxTokens = params.max_tokens || 4096;
+      const room = maxTokens - LEGACY_THINKING_OUTPUT_HEADROOM;
+      if (room < LEGACY_THINKING_MIN_BUDGET) {
+        // Not enough max_tokens headroom to fit even the minimum thinking
+        // budget alongside a real answer — skip rather than send a request
+        // that leaves no room for output.
+        this.log(`[AnthropicExecutor] reasoning_effort ignored — ${this.model} max_tokens=${maxTokens} too small for legacy thinking budget`);
+        return;
+      }
+      const target = LEGACY_THINKING_BUDGET_BY_EFFORT[effort] ?? LEGACY_THINKING_BUDGET_DEFAULT;
+      const budgetTokens = Math.max(LEGACY_THINKING_MIN_BUDGET, Math.min(target, room));
+      params.thinking = { type: 'enabled', budget_tokens: budgetTokens };
+      return;
     }
+
+    // e.g. some other/unknown model — effort has no known mapping there.
+    // Drop rather than send a request we know will 400.
+    this.log(`[AnthropicExecutor] reasoning_effort ignored — ${this.model} is not a reasoning-family model`);
   }
 }
