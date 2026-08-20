@@ -81,9 +81,67 @@ describe('AnthropicExecutor reasoning (opt-in)', () => {
     }
   });
 
-  it('drops reasoning_effort (no thinking) on a non-reasoning model like Haiku 4.5', async () => {
+  it('maps reasoning_effort -> legacy budget_tokens thinking on Haiku 4.5 (no adaptive/effort there)', async () => {
     stub();
-    const ex = new AnthropicExecutor(config('claude-haiku-4-5', { reasoning_effort: 'high' }));
+    const ex = new AnthropicExecutor(config('claude-haiku-4-5', { reasoning_effort: 'high', maxTokens: 16000 }));
+    await ex.invoke([{ role: 'user', content: 'hi' }]);
+
+    const sent = anthropicStream.mock.calls[0][0];
+    expect(sent.thinking).toEqual({ type: 'enabled', budget_tokens: 8192 });
+    // No adaptive-thinking surface on this model — output_config.effort is a 400 there.
+    expect(sent.output_config).toBeUndefined();
+    expect(sent.reasoning_effort).toBeUndefined();
+    // budget_tokens must be strictly less than max_tokens.
+    expect(sent.thinking.budget_tokens).toBeLessThan(sent.max_tokens);
+  });
+
+  it('also maps legacy thinking for Sonnet 4.5 / Opus 4.6 / Opus 4.5', async () => {
+    for (const model of ['claude-sonnet-4-5', 'claude-opus-4-6', 'claude-opus-4-5']) {
+      stub();
+      const ex = new AnthropicExecutor(config(model, { reasoning_effort: 'medium', maxTokens: 16000 }));
+      await ex.invoke([{ role: 'user', content: 'hi' }]);
+      const sent = anthropicStream.mock.calls[0][0];
+      expect(sent.thinking).toEqual({ type: 'enabled', budget_tokens: 4096 });
+      expect(sent.output_config).toBeUndefined();
+      vi.clearAllMocks();
+    }
+  });
+
+  it('does not strip sampling params for legacy-thinking models — they stay allowed there', async () => {
+    stub();
+    const ex = new AnthropicExecutor(config('claude-haiku-4-5', { reasoning_effort: 'low', maxTokens: 16000, temperature: 0.7, top_p: 0.9 }));
+    await ex.invoke([{ role: 'user', content: 'hi' }]);
+
+    const sent = anthropicStream.mock.calls[0][0];
+    expect(sent.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
+    expect(sent.temperature).toBe(0.7);
+    expect(sent.top_p).toBe(0.9);
+  });
+
+  it('clamps the legacy thinking budget to leave room for max_tokens (never >= max_tokens)', async () => {
+    stub();
+    // 'max' tier targets 32768, but max_tokens here only leaves 1536 of headroom.
+    const ex = new AnthropicExecutor(config('claude-haiku-4-5', { reasoning_effort: 'max', maxTokens: 2560 }));
+    await ex.invoke([{ role: 'user', content: 'hi' }]);
+
+    const sent = anthropicStream.mock.calls[0][0];
+    expect(sent.thinking.type).toBe('enabled');
+    expect(sent.thinking.budget_tokens).toBeGreaterThanOrEqual(1024);
+    expect(sent.thinking.budget_tokens).toBeLessThan(sent.max_tokens);
+  });
+
+  it('skips legacy thinking entirely when max_tokens leaves no room for even the minimum budget', async () => {
+    stub();
+    const ex = new AnthropicExecutor(config('claude-haiku-4-5', { reasoning_effort: 'high', maxTokens: 1500 }));
+    await ex.invoke([{ role: 'user', content: 'hi' }]);
+
+    const sent = anthropicStream.mock.calls[0][0];
+    expect(sent.thinking).toBeUndefined();
+  });
+
+  it('drops reasoning_effort (no thinking) on a model outside both families', async () => {
+    stub();
+    const ex = new AnthropicExecutor(config('claude-instant-1', { reasoning_effort: 'high', maxTokens: 16000 }));
     await ex.invoke([{ role: 'user', content: 'hi' }]);
 
     const sent = anthropicStream.mock.calls[0][0];
