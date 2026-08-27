@@ -76,6 +76,10 @@ class TestExecutor extends BaseExecutor {
   testHandleToolCalls(toolCalls: any[]) {
     return this.handleToolCalls(toolCalls);
   }
+
+  testStripUnexpectedArgs(name: string, args: Record<string, any>) {
+    return this.stripUnexpectedArgs(name, args);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -586,6 +590,169 @@ describe('normalizeToolArgs — wrapped params envelope rescue', () => {
       { id: 't1', name: 'create_task', args: { params: '{"title":"Buy milk"}' } },
     ]);
     expect(received).toEqual({ title: 'Buy milk' });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// stripUnexpectedArgs — a leaked/merged second tool call must not run silently
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('stripUnexpectedArgs — schema-foreign keys are stripped and surfaced', () => {
+  function toolManifest() {
+    return makeManifest({
+      spec: {
+        routingStrategy: 'fallback',
+        enableToolCalls: true,
+        variables: [],
+        files: [],
+        models: [{ provider: 'anthropic', model: 'claude-sonnet-4-5' }],
+        dependencies: [],
+        tools: [
+          {
+            name: 'think',
+            description: 'reason before acting',
+            parameters: {
+              type: 'object',
+              properties: {
+                thought: { type: 'string' },
+                note: { type: 'string' },
+              },
+              required: ['thought'],
+            },
+          },
+          {
+            name: 'create_task',
+            description: 'create a task',
+            parameters: {
+              type: 'object',
+              properties: {
+                title: { type: 'string' },
+                description: { type: 'string' },
+                plan: { type: 'array' },
+                executionPlan: { type: 'array' },
+                modelTier: { type: 'string' },
+              },
+              required: ['title'],
+            },
+          },
+          {
+            // A tool with a legitimate freeform nested object — top-level
+            // stripping must never reach inside it.
+            name: 'update_contact',
+            description: 'update a contact',
+            parameters: {
+              type: 'object',
+              properties: {
+                contactId: { type: 'string' },
+                properties: { type: 'object', additionalProperties: true },
+              },
+            },
+          },
+        ],
+      },
+    } as any);
+  }
+
+  function ex() {
+    return new TestExecutor(makeConfig(toolManifest()));
+  }
+
+  it('strips keys the schema does not declare and reports them', () => {
+    // The exact shape observed live 2026-08-26: create_task's own params
+    // bled into a think call as extra sibling keys.
+    const { args, unexpectedKeys } = ex().testStripUnexpectedArgs('think', {
+      thought: 'reasoning...',
+      description: 'Paul emailed Monica...',
+      plan: ['Check calendar', 'Send options'],
+      executionPlan: ['lookup_dates', 'search_events'],
+      modelTier: 'medium',
+    });
+    expect(args).toEqual({ thought: 'reasoning...' });
+    expect(unexpectedKeys.sort()).toEqual(['description', 'executionPlan', 'modelTier', 'plan']);
+  });
+
+  it('passes through untouched when every key is declared', () => {
+    const { args, unexpectedKeys } = ex().testStripUnexpectedArgs('think', {
+      thought: 'reasoning...',
+      note: 'a short trail',
+    });
+    expect(args).toEqual({ thought: 'reasoning...', note: 'a short trail' });
+    expect(unexpectedKeys).toEqual([]);
+  });
+
+  it('leaves args untouched for an unknown tool with no schema', () => {
+    const input = { anything: 'goes' };
+    const { args, unexpectedKeys } = ex().testStripUnexpectedArgs('no_such_tool', input);
+    expect(args).toBe(input);
+    expect(unexpectedKeys).toEqual([]);
+  });
+
+  it('does not mutate the caller args object in place', () => {
+    const input: Record<string, any> = { thought: 'x', stray: 'y' };
+    ex().testStripUnexpectedArgs('think', input);
+    expect(input).toEqual({ thought: 'x', stray: 'y' });
+  });
+
+  it('never reaches inside a nested freeform object (additionalProperties: true on a property)', () => {
+    const { args, unexpectedKeys } = ex().testStripUnexpectedArgs('update_contact', {
+      contactId: 'c1',
+      properties: { favoriteColor: 'blue', anythingGoesHere: 42 },
+    });
+    expect(args).toEqual({ contactId: 'c1', properties: { favoriteColor: 'blue', anythingGoesHere: 42 } });
+    expect(unexpectedKeys).toEqual([]);
+  });
+
+  it('strips before dispatch through handleToolCalls, so the handler never sees the foreign keys', async () => {
+    let received: any;
+    const router = {
+      think: { execute: async (args: any) => { received = args; return { completed: true }; } },
+    };
+    const executor = new TestExecutor(makeConfig(toolManifest(), { toolRouter: router }));
+    await executor.testHandleToolCalls([
+      {
+        id: 't1', name: 'think',
+        args: { thought: 'reasoning...', description: 'x', plan: [], executionPlan: [], modelTier: 'medium' },
+      },
+    ]);
+    expect(received).toEqual({ thought: 'reasoning...' });
+  });
+
+  it('surfaces a warning in the tool result so the model can re-issue the dropped call', async () => {
+    const router = {
+      think: { execute: async () => ({ completed: true }) },
+    };
+    const executor = new TestExecutor(makeConfig(toolManifest(), { toolRouter: router }));
+    const results = await executor.testHandleToolCalls([
+      { id: 't1', name: 'think', args: { thought: 'x', description: 'y', plan: [] } },
+    ]);
+    expect(results[0].content.completed).toBe(true);
+    expect(results[0].content.unexpectedArgsWarning).toEqual(expect.stringContaining('description'));
+    expect(results[0].content.unexpectedArgsWarning).toEqual(expect.stringContaining('plan'));
+    expect(results[0].content.unexpectedArgsWarning).toEqual(expect.stringContaining('did not happen'));
+  });
+
+  it('does not attach a warning when nothing was stripped', async () => {
+    const router = {
+      think: { execute: async () => ({ completed: true }) },
+    };
+    const executor = new TestExecutor(makeConfig(toolManifest(), { toolRouter: router }));
+    const results = await executor.testHandleToolCalls([
+      { id: 't1', name: 'think', args: { thought: 'x' } },
+    ]);
+    expect(results[0].content).toEqual({ completed: true });
+  });
+
+  it('logs a diagnostic when it strips something', async () => {
+    const log = vi.fn();
+    const router = {
+      think: { execute: async () => ({ completed: true }) },
+    };
+    const executor = new TestExecutor(makeConfig(toolManifest(), { toolRouter: router, log }));
+    await executor.testHandleToolCalls([
+      { id: 't1', name: 'think', args: { thought: 'x', description: 'y' } },
+    ]);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Tool 'think'"));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('description'));
   });
 });
 

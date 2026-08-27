@@ -1043,6 +1043,52 @@ export default class BaseExecutor {
     return out ?? workingArgs;
   }
 
+  /**
+   * Detects and strips top-level argument keys that aren't declared in the
+   * tool's own schema `properties` — a defensive backstop for a real,
+   * observed model generation defect: the model attempts a SECOND tool call
+   * in the same turn, but instead of its own `tool_use` block, that call's
+   * parameters land as extra sibling keys on THIS tool's `input` object.
+   * Anthropic (and every other provider here) emits one JSON object per
+   * tool_use with no `additionalProperties` enforcement, so nothing upstream
+   * catches this — the merged call runs looking "successful" and the second,
+   * intended call silently never happens.
+   *
+   * Confirmed live 2026-08-26: a `think` call's args carried `description` /
+   * `plan` / `executionPlan` / `modelTier` — `create_task`'s own params —
+   * while `create_task` itself never ran, silently dropping a scheduling
+   * request the model believed it had escalated. Sibling of the text-leak
+   * variant of this same failure family that `#warnIfLeakedToolCall` in the
+   * Anthropic provider already logs (a call written into visible text or a
+   * string arg instead of a real tool_use block) — this one lands as extra
+   * *structured* keys instead, so it needs its own guard.
+   *
+   * Fails open: an unknown tool, or a schema with no declared `properties`,
+   * returns args untouched — nothing to check against, same posture as
+   * `normalizeToolArgs` above. Only strips top-level keys; a property whose
+   * own type is `object` with `additionalProperties: true` (several tools
+   * here use that for freeform key/value data, e.g. `create_contact`'s
+   * `properties` field) is a declared value, not a stray key, and is left
+   * alone.
+   */
+  protected stripUnexpectedArgs(name: string, args: Record<string, any>): { args: Record<string, any>; unexpectedKeys: string[] } {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return { args, unexpectedKeys: [] };
+
+    const def = this.allToolDefs.find(d => d.function?.name === name);
+    const properties = def?.function?.parameters?.properties;
+    if (!properties || typeof properties !== 'object') return { args, unexpectedKeys: [] };
+
+    const known = new Set(Object.keys(properties as Record<string, any>));
+    const unexpectedKeys = Object.keys(args).filter(k => !known.has(k));
+    if (unexpectedKeys.length === 0) return { args, unexpectedKeys };
+
+    const cleaned: Record<string, any> = {};
+    for (const [key, value] of Object.entries(args)) {
+      if (known.has(key)) cleaned[key] = value;
+    }
+    return { args: cleaned, unexpectedKeys };
+  }
+
   protected async handleToolCalls(toolCalls: ToolCall[]): Promise<ToolResult[]> {
     const results: ToolResult[] = [];
 
@@ -1072,6 +1118,20 @@ export default class BaseExecutor {
       // tool calls behave identically to the execute_tool meta-tool path.
       tc.args = this.normalizeToolArgs(tc.name, tc.args);
 
+      // Strip any argument key the tool's own schema doesn't declare —
+      // guards against a merged/leaked second tool call (see
+      // stripUnexpectedArgs's doc comment). Surfaced to the model below so
+      // it can re-issue whatever call actually got dropped.
+      const { args: strippedArgs, unexpectedKeys } = this.stripUnexpectedArgs(tc.name, tc.args);
+      tc.args = strippedArgs;
+      if (unexpectedKeys.length > 0) {
+        this.log(
+          `[BaseExecutor] Tool '${tc.name}' was called with argument(s) not in its schema ` +
+          `(${unexpectedKeys.join(', ')}) — stripped before dispatch. This is a common signature ` +
+          `of a second, intended tool call whose parameters bled into this one and never ran.`
+        );
+      }
+
       if (tc.name === 'finish_agent_run') {
         const handler = this.toolRouter[tc.name];
         if (handler) {
@@ -1099,6 +1159,20 @@ export default class BaseExecutor {
             toolResult = { completed: false, error: true, message: 'Tool error. Please try a different approach.' };
           }
         }
+      }
+
+      // Make the strip visible to the MODEL, not just the logs: a silent
+      // strip still leaves the dropped call's work undone with no signal to
+      // recover it. Only on a plain-object result — never reshape a
+      // primitive/array return.
+      if (unexpectedKeys.length > 0 && toolResult && typeof toolResult === 'object' && !Array.isArray(toolResult)) {
+        toolResult = {
+          ...toolResult,
+          unexpectedArgsWarning:
+            `This call also carried argument(s) that are not part of '${tc.name}''s schema: ` +
+            `${unexpectedKeys.join(', ')}. They were dropped before this call ran. If you intended ` +
+            'those as a SEPARATE tool call, it did not happen — issue it explicitly now.',
+        };
       }
 
       // Fire after_tool_call hook (observability)
