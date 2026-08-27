@@ -100,6 +100,26 @@ describe('AnthropicExecutor — leaked tool call detection', () => {
     expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('Detected leaked tool call in model output'));
   });
 
+  it('warns on a bare <invoke name="..."> leak with no <function_calls> wrapper (the observed live shape, 2026-08-27)', async () => {
+    // Real incident: a `think` call's `thought` argument ended mid-tag with
+    // `<invoke name="create_task">\n<parameter name="title">...` and no
+    // enclosing `<function_calls>` — the old wrapper-required pattern missed
+    // this entirely, so it never got logged.
+    stub([
+      {
+        type: 'tool_use',
+        id: 'toolu_4',
+        name: 'think',
+        input: { thought: 'Now let\'s write it out.\n\n<invoke name="create_task">\n<parameter name="title">Find time next week' },
+      },
+    ]);
+    const ex = new AnthropicExecutor(config());
+    const logSpy = vi.spyOn(ex as any, 'log');
+    await ex.invoke([{ role: 'user', content: 'hi' }]);
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Detected leaked tool call in model output'));
+  });
+
   it('does not false-positive on a normal tool call whose args merely mention "invoke" or contain angle brackets', async () => {
     stub([
       {

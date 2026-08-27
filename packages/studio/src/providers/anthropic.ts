@@ -54,11 +54,14 @@ const LEGACY_THINKING_MIN_BUDGET = 1024;
 /** Reserve this many max_tokens for the actual answer after thinking — budget_tokens must be strictly less than max_tokens. */
 const LEGACY_THINKING_OUTPUT_HEADROOM = 1024;
 
-/** Leaked pseudo-XML tool-call syntax (`<function_calls><invoke name="...">`)
- * that some models occasionally emit instead of a real tool_use block —
- * observed both in top-level visible text and, more often in practice, stuffed
- * inside a string-valued argument of an otherwise-real tool call. */
-const LEAKED_TOOL_CALL_PATTERN = /<function_calls>[\s\S]*?<invoke\s+name=["']/i;
+/** Leaked pseudo-XML tool-call syntax (`<function_calls><invoke name="...">`,
+ * or a bare `<invoke name="...">` with no wrapper — observed 2026-08-27,
+ * incident where the wrapper was absent and the old wrapper-required pattern
+ * missed it) that some models occasionally emit instead of a real tool_use
+ * block — observed both in top-level visible text and, more often in
+ * practice, stuffed inside a string-valued argument of an otherwise-real
+ * tool call. */
+const LEAKED_TOOL_CALL_PATTERN = /<invoke\s+name=["']/i;
 
 export default class AnthropicExecutor extends BaseExecutor {
   private client: Anthropic;
