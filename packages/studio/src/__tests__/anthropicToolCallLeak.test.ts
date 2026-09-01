@@ -20,9 +20,9 @@ import { anthropicMessageStream } from './_streamMocks.js';
 
 const anthropicStream = vi.fn();
 vi.mock('@anthropic-ai/sdk', () => ({
-  default: vi.fn().mockImplementation(() => ({
+  default: vi.fn().mockImplementation(function () { return {
     messages: { stream: anthropicStream },
-  })),
+  }; }),
 }));
 
 import AnthropicExecutor from '../providers/anthropic.js';

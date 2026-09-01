@@ -7,9 +7,9 @@ vi.mock('../cli/utils/config.js', () => ({
 
 // Mock API client
 vi.mock('../cli/utils/api.js', () => ({
-  AgntApiClient: vi.fn().mockImplementation(() => ({
+  AgntApiClient: vi.fn().mockImplementation(function () { return {
     getManifest: vi.fn().mockResolvedValue({ spec: { models: [{ provider: 'anthropic', model: 'claude-3' }] }, metadata: { etag: 'etag1' } })
-  }))
+  }; })
 }));
 
 // Mock executor factory
