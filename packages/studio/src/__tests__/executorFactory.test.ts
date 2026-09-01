@@ -1,15 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
 
 // Mock all provider executors
-vi.mock('../providers/anthropic.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'anthropic' })) }));
-vi.mock('../providers/openai.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'openai' })) }));
-vi.mock('../providers/bedrock.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'bedrock' })) }));
-vi.mock('../providers/azureFoundry.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'azureFoundry' })) }));
-vi.mock('../providers/google.js', () => ({ default: vi.fn().mockImplementation(() => ({ provider: 'google' })) }));
+vi.mock('../providers/anthropic.js', () => ({ default: vi.fn().mockImplementation(function () { return { provider: 'anthropic' }; }) }));
+vi.mock('../providers/openai.js', () => ({ default: vi.fn().mockImplementation(function () { return { provider: 'openai' }; }) }));
+vi.mock('../providers/bedrock.js', () => ({ default: vi.fn().mockImplementation(function () { return { provider: 'bedrock' }; }) }));
+vi.mock('../providers/azureFoundry.js', () => ({ default: vi.fn().mockImplementation(function () { return { provider: 'azureFoundry' }; }) }));
+vi.mock('../providers/google.js', () => ({ default: vi.fn().mockImplementation(function () { return { provider: 'google' }; }) }));
 // DeepSeek / Together / Fireworks / DeepInfra all share the OpenAI-compatible
 // executor. Mock it AND re-export the provider set the factory imports.
 vi.mock('../providers/openaiCompatible.js', () => ({
-  default: vi.fn().mockImplementation(() => ({ provider: 'openai-compatible' })),
+  default: vi.fn().mockImplementation(function () { return { provider: 'openai-compatible' }; }),
   OPENAI_COMPATIBLE_PROVIDERS: new Set(['together', 'fireworks', 'deepinfra', 'deepseek']),
   OPENAI_COMPATIBLE_BASE_URLS: {},
 }));

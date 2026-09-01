@@ -28,7 +28,7 @@ import { openAIStreamFromCompletion, openAIToolCallStream } from './_streamMocks
 const openaiCreate = vi.fn();
 const openaiCtor = vi.fn();
 vi.mock('openai', () => ({
-  default: vi.fn().mockImplementation((opts: any) => {
+  default: vi.fn().mockImplementation(function (opts: any) {
     openaiCtor(opts);
     return { chat: { completions: { create: openaiCreate } } };
   }),

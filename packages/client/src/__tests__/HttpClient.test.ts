@@ -20,6 +20,11 @@ function mockFetch(status: number, body: any, isJson = true) {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // `getToken` is a standalone vi.fn() (not a vi.spyOn() spy), so
+  // restoreAllMocks() has no "original" to restore it to and leaves its
+  // call history intact across tests (vitest v4 behavior change from v2 —
+  // see https://vitest.dev/guide/migration.html). Clear it explicitly.
+  getToken.mockClear();
   getToken.mockResolvedValue(mockToken);
 });
 

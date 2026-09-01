@@ -4,12 +4,12 @@ import { signJwt } from '../auth.js';
 // Mock jose
 vi.mock('jose', () => ({
   importPKCS8: vi.fn().mockResolvedValue('mock-key'),
-  SignJWT: vi.fn().mockImplementation(() => ({
+  SignJWT: vi.fn().mockImplementation(function () { return {
     setProtectedHeader: vi.fn().mockReturnThis(),
     setIssuedAt: vi.fn().mockReturnThis(),
     setExpirationTime: vi.fn().mockReturnThis(),
     sign: vi.fn().mockResolvedValue('mock.jwt.token')
-  }))
+  }; })
 }));
 
 // Reset module-level token cache between tests
