@@ -12,19 +12,19 @@ vi.mock('../auth.js', () => ({
 
 // Mock HttpClient
 vi.mock('../HttpClient.js', () => ({
-  HttpClient: vi.fn().mockImplementation(() => ({})),
+  HttpClient: vi.fn().mockImplementation(function () { return {}; }),
   AgntApiError: class AgntApiError extends Error {}
 }));
 
 // Mock all resources
-vi.mock('../resources/ChatsResource.js', () => ({ ChatsResource: vi.fn().mockImplementation(() => ({ _name: 'chats' })) }));
-vi.mock('../resources/TasksResource.js', () => ({ TasksResource: vi.fn().mockImplementation(() => ({ _name: 'tasks' })) }));
-vi.mock('../resources/MemoriesResource.js', () => ({ MemoriesResource: vi.fn().mockImplementation(() => ({ _name: 'memories' })) }));
-vi.mock('../resources/ContactsResource.js', () => ({ ContactsResource: vi.fn().mockImplementation(() => ({ _name: 'contacts' })) }));
-vi.mock('../resources/IdentifiersResource.js', () => ({ IdentifiersResource: vi.fn().mockImplementation(() => ({ _name: 'identifiers' })) }));
-vi.mock('../resources/AssistantsResource.js', () => ({ AssistantsResource: vi.fn().mockImplementation(() => ({ _name: 'assistants' })) }));
-vi.mock('../resources/UsersResource.js', () => ({ UsersResource: vi.fn().mockImplementation(() => ({ _name: 'users' })) }));
-vi.mock('../resources/WebhooksResource.js', () => ({ WebhooksResource: vi.fn().mockImplementation(() => ({ _name: 'webhooks' })) }));
+vi.mock('../resources/ChatsResource.js', () => ({ ChatsResource: vi.fn().mockImplementation(function () { return { _name: 'chats' }; }) }));
+vi.mock('../resources/TasksResource.js', () => ({ TasksResource: vi.fn().mockImplementation(function () { return { _name: 'tasks' }; }) }));
+vi.mock('../resources/MemoriesResource.js', () => ({ MemoriesResource: vi.fn().mockImplementation(function () { return { _name: 'memories' }; }) }));
+vi.mock('../resources/ContactsResource.js', () => ({ ContactsResource: vi.fn().mockImplementation(function () { return { _name: 'contacts' }; }) }));
+vi.mock('../resources/IdentifiersResource.js', () => ({ IdentifiersResource: vi.fn().mockImplementation(function () { return { _name: 'identifiers' }; }) }));
+vi.mock('../resources/AssistantsResource.js', () => ({ AssistantsResource: vi.fn().mockImplementation(function () { return { _name: 'assistants' }; }) }));
+vi.mock('../resources/UsersResource.js', () => ({ UsersResource: vi.fn().mockImplementation(function () { return { _name: 'users' }; }) }));
+vi.mock('../resources/WebhooksResource.js', () => ({ WebhooksResource: vi.fn().mockImplementation(function () { return { _name: 'webhooks' }; }) }));
 
 import { AgntClient } from '../AgntClient.js';
 import { loadConfig } from '@agnt-sdk/config';

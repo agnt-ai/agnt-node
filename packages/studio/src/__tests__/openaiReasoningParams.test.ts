@@ -23,10 +23,10 @@ import { openAIStreamFromCompletion, openAIResponsesStreamFromResponse } from '.
 const openaiChatCreate = vi.fn();
 const openaiResponsesCreate = vi.fn();
 vi.mock('openai', () => ({
-  default: vi.fn().mockImplementation(() => ({
+  default: vi.fn().mockImplementation(function () { return {
     chat: { completions: { create: openaiChatCreate } },
     responses: { create: openaiResponsesCreate },
-  })),
+  }; }),
 }));
 
 import OpenAIExecutor from '../providers/openai.js';

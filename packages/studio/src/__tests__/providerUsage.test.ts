@@ -30,23 +30,23 @@ import {
 
 const openaiCreate = vi.fn();
 vi.mock('openai', () => ({
-  default: vi.fn().mockImplementation(() => ({
+  default: vi.fn().mockImplementation(function () { return {
     chat: { completions: { create: openaiCreate } },
-  })),
+  }; }),
 }));
 
 const googleGenerateContentStream = vi.fn();
 vi.mock('@google/generative-ai', () => ({
-  GoogleGenerativeAI: vi.fn().mockImplementation(() => ({
+  GoogleGenerativeAI: vi.fn().mockImplementation(function () { return {
     getGenerativeModel: () => ({ generateContentStream: googleGenerateContentStream }),
-  })),
+  }; }),
 }));
 
 const anthropicStream = vi.fn();
 vi.mock('@anthropic-ai/sdk', () => ({
-  default: vi.fn().mockImplementation(() => ({
+  default: vi.fn().mockImplementation(function () { return {
     messages: { stream: anthropicStream },
-  })),
+  }; }),
 }));
 
 import OpenAIExecutor from '../providers/openai.js';

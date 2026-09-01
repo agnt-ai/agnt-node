@@ -23,8 +23,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const bedrockSend = vi.fn();
 vi.mock('@aws-sdk/client-bedrock-runtime', () => ({
-  BedrockRuntimeClient: vi.fn().mockImplementation(() => ({ send: bedrockSend })),
-  ConverseCommand: vi.fn().mockImplementation((params: any) => ({ params })),
+  BedrockRuntimeClient: vi.fn().mockImplementation(function () { return { send: bedrockSend }; }),
+  ConverseCommand: vi.fn().mockImplementation(function (params: any) { return { params }; }),
 }));
 
 import BedrockExecutor from '../bedrock.js';
