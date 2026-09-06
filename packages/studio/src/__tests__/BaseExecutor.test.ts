@@ -848,6 +848,52 @@ describe('getMissingRequiredKeys — required keys absent after stripping are ca
     expect(ex().testGetMissingRequiredKeys('no_such_tool', {})).toEqual([]);
   });
 
+  // A required key can be *present* yet effectively missing — an explicit
+  // `params: null` is the same failure mode as a dropped `params` key, just
+  // phrased differently. Matches agnt-backend's
+  // primeRunner.mjs#enforceLoadedToolParams convention: undefined/null/''
+  // count as missing for required params; false/0 (legitimately falsy) do not.
+  it('flags a required key explicitly set to null as missing', () => {
+    expect(ex().testGetMissingRequiredKeys('execute_tool', { tool_name: 'create_task', params: null })).toEqual(['params']);
+  });
+
+  it('flags a required key explicitly set to undefined as missing', () => {
+    expect(ex().testGetMissingRequiredKeys('execute_tool', { tool_name: 'create_task', params: undefined })).toEqual(['params']);
+  });
+
+  it('flags a required key explicitly set to an empty string as missing', () => {
+    expect(ex().testGetMissingRequiredKeys('execute_tool', { tool_name: '', params: {} })).toEqual(['tool_name']);
+  });
+
+  it('does NOT flag a required key that is legitimately false or 0', () => {
+    const manifest = makeManifest({
+      spec: {
+        routingStrategy: 'fallback',
+        enableToolCalls: true,
+        variables: [],
+        files: [],
+        models: [{ provider: 'anthropic', model: 'claude-sonnet-4-5' }],
+        dependencies: [],
+        tools: [
+          {
+            name: 'set_flags',
+            description: 'set boolean/numeric flags',
+            parameters: {
+              type: 'object',
+              properties: {
+                enabled: { type: 'boolean' },
+                count: { type: 'number' },
+              },
+              required: ['enabled', 'count'],
+            },
+          },
+        ],
+      },
+    } as any);
+    const executor = new TestExecutor(makeConfig(manifest));
+    expect(executor.testGetMissingRequiredKeys('set_flags', { enabled: false, count: 0 })).toEqual([]);
+  });
+
   it('handleToolCalls refuses dispatch — the miskeyed-args incident, reproduced', async () => {
     let called = false;
     const router = {

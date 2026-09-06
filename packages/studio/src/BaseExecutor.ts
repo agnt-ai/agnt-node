@@ -1106,13 +1106,22 @@ export default class BaseExecutor {
    * Fails open (same posture as stripUnexpectedArgs): an unknown tool, or a
    * schema with no `required` array, returns no missing keys — nothing to
    * check against.
+   *
+   * A required key is treated as missing if it's absent from `args` OR its
+   * value is `undefined`, `null`, or `''` — an explicit `params: null` is
+   * functionally the same failure mode as a dropped `params` key, just
+   * phrased differently. This mirrors agnt-backend's
+   * `primeRunner.mjs#enforceLoadedToolParams`, which treats the same three
+   * values as "missing" for required params. Legitimately falsy-but-present
+   * values (`false`, `0`) are deliberately NOT flagged — only these three
+   * "missing-in-spirit" values are, same as that convention.
    */
   protected getMissingRequiredKeys(name: string, args: Record<string, any>): string[] {
     const def = this.allToolDefs.find(d => d.function?.name === name);
     const required = def?.function?.parameters?.required;
     if (!Array.isArray(required) || required.length === 0) return [];
     if (!args || typeof args !== 'object' || Array.isArray(args)) return [...required];
-    return required.filter(k => !(k in args));
+    return required.filter(k => !(k in args) || args[k] === undefined || args[k] === null || args[k] === '');
   }
 
   protected async handleToolCalls(toolCalls: ToolCall[]): Promise<ToolResult[]> {
