@@ -151,14 +151,38 @@ export interface TracingConfig {
   tags?: string[];
 }
 
-export interface ModelPricing {
-  provider: string;
-  name: string;
+/**
+ * One rate set: what to charge per 1M tokens in each bucket. Shared shape
+ * between the model's base (flat) rates and each entry in `tiers` below —
+ * see PricingTier for what "entry in tiers" means.
+ */
+export interface PricingRateSet {
   inputTokensPer1M: number;
   outputTokensPer1M: number;
   cacheCreationTokensPer1M?: number | null;
   cacheReadTokensPer1M?: number | null;
+}
+
+/**
+ * A token-range ("cliff") pricing band. Not marginal/progressive: once a
+ * request's total input tokens (cache-inclusive) exceed `thresholdInputTokens`,
+ * ALL of its tokens — input, output, cache read, cache write — bill at this
+ * tier's rates instead of the model's base rates. Introduced for GPT-6 Astra
+ * (272,000-token threshold) but generic across any provider/model.
+ */
+export interface PricingTier extends PricingRateSet {
+  thresholdInputTokens: number;
+}
+
+export interface ModelPricing extends PricingRateSet {
+  provider: string;
+  name: string;
   currency: string;
+  /** Token-range pricing bands, sorted ascending by thresholdInputTokens.
+   *  Absent/empty (every model except ones that opt in) means flat pricing —
+   *  the base PricingRateSet fields above apply to every request. See
+   *  resolvePricingTier() in BaseExecutor.ts for how this is resolved. */
+  tiers?: PricingTier[];
 }
 
 export interface BaseExecutorConfig {

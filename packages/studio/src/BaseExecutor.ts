@@ -25,7 +25,8 @@ import type {
   ToolRouter,
   ToolCallCallback,
   TracingConfig,
-  ModelPricing
+  ModelPricing,
+  PricingRateSet
 } from './types.js';
 import { evaluateCondition } from './conditions.js';
 import { sendTrace } from './tracing.js';
@@ -640,6 +641,48 @@ export default class BaseExecutor {
            (usage.cache_read_input_tokens || 0);
   }
 
+  // Resolve which rate set applies to a request whose total INPUT tokens
+  // (cache-inclusive — uncached input + cache read + cache creation, the same
+  // number a provider's own token-range threshold is measured against) is
+  // `totalInputTokens`.
+  //
+  // Token-range ("cliff") pricing is NOT marginal/progressive: GPT-6 Astra
+  // (the model that motivated this) reprices its ENTIRE request — input,
+  // output, cache read, cache write — once total input crosses 272,000
+  // tokens, not just the tokens past the threshold. So this walks `tiers` (if
+  // any) in order and keeps the LAST one whose `thresholdInputTokens` the
+  // total exceeds — tiers must be sorted ascending by threshold — falling
+  // back to the model's flat base rates when `tiers` is absent/empty or the
+  // total never crosses a threshold. That's every model except the ones that
+  // opt in, so this is a no-op for the overwhelming majority of calls.
+  //
+  // Mirrors agnt-backend's resolvePricingTier()
+  // (layers/agnt-shared/utils/modelPricing.mjs) — same semantics, duplicated
+  // because the two are separate repos/runtimes.
+  private static resolvePricingTier(pricing: ModelPricing | undefined, totalInputTokens: number): PricingRateSet {
+    const base: PricingRateSet = {
+      inputTokensPer1M: pricing?.inputTokensPer1M ?? 3,
+      outputTokensPer1M: pricing?.outputTokensPer1M ?? 15,
+      cacheCreationTokensPer1M: pricing?.cacheCreationTokensPer1M ?? 0,
+      cacheReadTokensPer1M: pricing?.cacheReadTokensPer1M ?? 0,
+    };
+    const tiers = pricing?.tiers;
+    if (!Array.isArray(tiers) || tiers.length === 0) return base;
+
+    let resolved = base;
+    for (const tier of tiers) {
+      if (totalInputTokens > tier.thresholdInputTokens) {
+        resolved = {
+          inputTokensPer1M: tier.inputTokensPer1M ?? 0,
+          outputTokensPer1M: tier.outputTokensPer1M ?? 0,
+          cacheCreationTokensPer1M: tier.cacheCreationTokensPer1M ?? 0,
+          cacheReadTokensPer1M: tier.cacheReadTokensPer1M ?? 0,
+        };
+      }
+    }
+    return resolved;
+  }
+
   // Calculate cost in USD using per-model rates from the pricing catalog.
   //
   // Provider-agnostic, model-driven: cost is data, not branching. The four-term
@@ -653,19 +696,27 @@ export default class BaseExecutor {
   //        + cacheRead    /1e6 * (cacheReadTokensPer1M     ?? 0)
   //        + cacheCreation/1e6 * (cacheCreationTokensPer1M ?? 0)
   //
-  // Accepts either a raw provider usage object (disjoint buckets) or, for the
-  // simple no-cache call sites, plain input/output token counts.
+  // Rates are resolved PER CALL via resolvePricingTier() above, keyed off this
+  // call's own total input tokens — see that method for why. Accepts either a
+  // raw provider usage object (disjoint buckets) or, for the simple no-cache
+  // call sites, plain input/output token counts.
   protected calculateCost(
     inputTokensOrUsage: number | { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number },
     outputTokens: number
   ): number {
-    const p = this.modelPricing;
-    const inRate      = p?.inputTokensPer1M          ?? 3;
-    const outRate     = p?.outputTokensPer1M         ?? 15;
+    const totalInputTokens = typeof inputTokensOrUsage === 'number'
+      ? inputTokensOrUsage
+      : (inputTokensOrUsage.input_tokens || 0)
+        + (inputTokensOrUsage.cache_creation_input_tokens || 0)
+        + (inputTokensOrUsage.cache_read_input_tokens || 0);
+
+    const rates = BaseExecutor.resolvePricingTier(this.modelPricing, totalInputTokens);
+    const inRate      = rates.inputTokensPer1M;
+    const outRate     = rates.outputTokensPer1M;
     // A null/undefined cache rate means this provider/model doesn't bill that
     // bucket — it contributes 0. No provider-specific multiplier fallback.
-    const createRate  = p?.cacheCreationTokensPer1M  ?? 0;
-    const readRate    = p?.cacheReadTokensPer1M      ?? 0;
+    const createRate  = rates.cacheCreationTokensPer1M  ?? 0;
+    const readRate    = rates.cacheReadTokensPer1M      ?? 0;
 
     let costUSD = (outputTokens / 1_000_000) * outRate;
 
