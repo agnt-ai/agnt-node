@@ -178,7 +178,9 @@ export interface ModelPricing extends PricingRateSet {
   provider: string;
   name: string;
   currency: string;
-  /** Token-range pricing bands, sorted ascending by thresholdInputTokens.
+  /** Token-range pricing bands. Order doesn't matter — resolvePricingTier()
+   *  picks the highest threshold exceeded regardless of array position — but
+   *  ascending is the readable convention for hand-authored catalog entries.
    *  Absent/empty (every model except ones that opt in) means flat pricing —
    *  the base PricingRateSet fields above apply to every request. See
    *  resolvePricingTier() in BaseExecutor.ts for how this is resolved. */

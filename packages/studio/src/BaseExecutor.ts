@@ -649,12 +649,14 @@ export default class BaseExecutor {
   // Token-range ("cliff") pricing is NOT marginal/progressive: GPT-6 Astra
   // (the model that motivated this) reprices its ENTIRE request — input,
   // output, cache read, cache write — once total input crosses 272,000
-  // tokens, not just the tokens past the threshold. So this walks `tiers` (if
-  // any) in order and keeps the LAST one whose `thresholdInputTokens` the
-  // total exceeds — tiers must be sorted ascending by threshold — falling
-  // back to the model's flat base rates when `tiers` is absent/empty or the
-  // total never crosses a threshold. That's every model except the ones that
-  // opt in, so this is a no-op for the overwhelming majority of calls.
+  // tokens, not just the tokens past the threshold. So this scans ALL of
+  // `tiers` (if any) and picks the one with the HIGHEST `thresholdInputTokens`
+  // that the total exceeds — array order doesn't matter, so a tier list
+  // authored or edited out of ascending order still resolves correctly —
+  // falling back to the model's flat base rates when `tiers` is absent/empty
+  // or the total never crosses a threshold. That's every model except the
+  // ones that opt in, so this is a no-op for the overwhelming majority of
+  // calls.
   //
   // Mirrors agnt-backend's resolvePricingTier()
   // (layers/agnt-shared/utils/modelPricing.mjs) — same semantics, duplicated
@@ -670,8 +672,10 @@ export default class BaseExecutor {
     if (!Array.isArray(tiers) || tiers.length === 0) return base;
 
     let resolved = base;
+    let resolvedThreshold = -Infinity;
     for (const tier of tiers) {
-      if (totalInputTokens > tier.thresholdInputTokens) {
+      if (totalInputTokens > tier.thresholdInputTokens && tier.thresholdInputTokens > resolvedThreshold) {
+        resolvedThreshold = tier.thresholdInputTokens;
         resolved = {
           inputTokensPer1M: tier.inputTokensPer1M ?? 0,
           outputTokensPer1M: tier.outputTokensPer1M ?? 0,

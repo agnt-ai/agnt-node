@@ -394,6 +394,27 @@ describe('calculateCost — token-range pricing tiers', () => {
     // 300,000 > 272,000 → overflow input rate 20: 0.3*20 = 6
     expect(cost).toBeCloseTo(6, 6);
   });
+
+  it('is ORDER-INDEPENDENT: with two tiers, the array order does not decide which one wins', () => {
+    // A hand-edited catalog row, or an admin UI that doesn't enforce sort
+    // order, must not silently pick the wrong tier just because of array
+    // position — resolvePricingTier() picks the highest threshold exceeded,
+    // not "the last one in the array."
+    const ascendingTiers = {
+      provider: 'openai', name: 'gpt-6-astra', inputTokensPer1M: 10, outputTokensPer1M: 50, currency: 'USD',
+      tiers: [
+        { thresholdInputTokens: 100_000, inputTokensPer1M: 15, outputTokensPer1M: 60 },
+        { thresholdInputTokens: 272_000, inputTokensPer1M: 20, outputTokensPer1M: 75 },
+      ],
+    };
+    const descendingTiers = { ...ascendingTiers, tiers: [...ascendingTiers.tiers].reverse() };
+
+    const costAscending = exWith(ascendingTiers).testCalculateCost({ input_tokens: 300_000 }, 1_000_000);
+    const costDescending = exWith(descendingTiers).testCalculateCost({ input_tokens: 300_000 }, 1_000_000);
+    // 0.3*20 + 1*75 = 81 — the 272K tier (highest exceeded), regardless of array order
+    expect(costAscending).toBeCloseTo(81, 6);
+    expect(costDescending).toBeCloseTo(costAscending, 6);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
