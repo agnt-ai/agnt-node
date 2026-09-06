@@ -1089,6 +1089,32 @@ export default class BaseExecutor {
     return { args: cleaned, unexpectedKeys };
   }
 
+  /**
+   * Returns the tool's own schema-declared `required` keys that are absent
+   * from `args` — checked AFTER stripUnexpectedArgs, so this also catches
+   * the case that guard's own doc comment doesn't cover: a misnamed
+   * top-level key (e.g. `parameters` instead of `params` on `execute_tool`)
+   * gets stripped as unexpected, silently leaving a REQUIRED key missing.
+   * Before this check, that call still dispatched with the required param
+   * absent — e.g. `execute_tool({tool_name, parameters: {...}})` ran with no
+   * `params` at all, so the inner tool executed against empty/default
+   * arguments instead of failing loudly. Confirmed live 2026-09-04 (task
+   * 6a9b1612d6100588e6ac9a5b): a miskeyed `create_calendar_event` call lost
+   * its params entirely this way and silently created a blank placeholder
+   * event on the wrong calendar.
+   *
+   * Fails open (same posture as stripUnexpectedArgs): an unknown tool, or a
+   * schema with no `required` array, returns no missing keys — nothing to
+   * check against.
+   */
+  protected getMissingRequiredKeys(name: string, args: Record<string, any>): string[] {
+    const def = this.allToolDefs.find(d => d.function?.name === name);
+    const required = def?.function?.parameters?.required;
+    if (!Array.isArray(required) || required.length === 0) return [];
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return [...required];
+    return required.filter(k => !(k in args));
+  }
+
   protected async handleToolCalls(toolCalls: ToolCall[]): Promise<ToolResult[]> {
     const results: ToolResult[] = [];
 
@@ -1130,6 +1156,29 @@ export default class BaseExecutor {
           `(${unexpectedKeys.join(', ')}) — stripped before dispatch. This is a common signature ` +
           `of a second, intended tool call whose parameters bled into this one and never ran.`
         );
+      }
+
+      // Refuse to dispatch when a schema-required key is missing (including
+      // one that just got stripped above as "unexpected" — e.g. a misnamed
+      // key). Running the handler anyway means the inner tool executes
+      // against empty/default arguments with no loud signal that anything
+      // was wrong; see getMissingRequiredKeys's doc comment for the live
+      // incident this closes.
+      const missingRequired = this.getMissingRequiredKeys(tc.name, tc.args);
+      if (missingRequired.length > 0) {
+        const maybeTypo = unexpectedKeys.length > 0
+          ? ` Argument(s) ${unexpectedKeys.join(', ')} were also dropped as not part of this tool's schema — ` +
+            `if one of those was meant to BE ${missingRequired.join(', ')} (e.g. a misnamed key), reissue with the correct key name.`
+          : '';
+        toolResult = {
+          completed: false,
+          error: true,
+          missingRequired,
+          message: `Tool '${tc.name}' is missing required parameter(s): ${missingRequired.join(', ')}. ` +
+            `The tool was NOT executed.${maybeTypo} Reissue the call with all required parameters present.`,
+        };
+        results.push({ tool_call_id: tc.id, content: toolResult });
+        continue;
       }
 
       if (tc.name === 'finish_agent_run') {

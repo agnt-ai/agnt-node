@@ -80,6 +80,10 @@ class TestExecutor extends BaseExecutor {
   testStripUnexpectedArgs(name: string, args: Record<string, any>) {
     return this.stripUnexpectedArgs(name, args);
   }
+
+  testGetMissingRequiredKeys(name: string, args: Record<string, any>) {
+    return this.getMissingRequiredKeys(name, args);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -648,6 +652,21 @@ describe('stripUnexpectedArgs — schema-foreign keys are stripped and surfaced'
               },
             },
           },
+          {
+            // Mirrors the real execute_tool.json meta-tool: both top-level
+            // keys are required, and `params` is the exact key a model has
+            // been observed to miskey as `parameters`.
+            name: 'execute_tool',
+            description: 'execute any tool by name',
+            parameters: {
+              type: 'object',
+              properties: {
+                tool_name: { type: 'string' },
+                params: { type: 'object' },
+              },
+              required: ['tool_name', 'params'],
+            },
+          },
         ],
       },
     } as any);
@@ -753,6 +772,115 @@ describe('stripUnexpectedArgs — schema-foreign keys are stripped and surfaced'
     ]);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("Tool 'think'"));
     expect(log).toHaveBeenCalledWith(expect.stringContaining('description'));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getMissingRequiredKeys / handleToolCalls — a schema-required key missing
+// after stripping must refuse dispatch, not run with it silently absent.
+// Real incident 2026-09-04 (task 6a9b1612d6100588e6ac9a5b): a model call
+// keyed execute_tool's payload as `parameters` instead of `params`;
+// stripUnexpectedArgs correctly dropped the foreign key, but the tool still
+// ran with `params` entirely missing — creating a blank placeholder calendar
+// event on the wrong calendar instead of failing loudly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('getMissingRequiredKeys — required keys absent after stripping are caught', () => {
+  function toolManifest() {
+    return makeManifest({
+      spec: {
+        routingStrategy: 'fallback',
+        enableToolCalls: true,
+        variables: [],
+        files: [],
+        models: [{ provider: 'anthropic', model: 'claude-sonnet-4-5' }],
+        dependencies: [],
+        tools: [
+          {
+            name: 'execute_tool',
+            description: 'execute any tool by name',
+            parameters: {
+              type: 'object',
+              properties: {
+                tool_name: { type: 'string' },
+                params: { type: 'object' },
+              },
+              required: ['tool_name', 'params'],
+            },
+          },
+          {
+            name: 'update_contact',
+            description: 'update a contact',
+            parameters: {
+              type: 'object',
+              properties: {
+                contactId: { type: 'string' },
+                properties: { type: 'object', additionalProperties: true },
+              },
+            },
+          },
+        ],
+      },
+    } as any);
+  }
+
+  function ex() {
+    return new TestExecutor(makeConfig(toolManifest()));
+  }
+
+  it('reports no missing keys when every required key is present', () => {
+    expect(ex().testGetMissingRequiredKeys('execute_tool', { tool_name: 'create_task', params: {} })).toEqual([]);
+  });
+
+  it('reports a missing required key', () => {
+    expect(ex().testGetMissingRequiredKeys('execute_tool', { tool_name: 'create_task' })).toEqual(['params']);
+  });
+
+  it('returns all required keys when args is not an object', () => {
+    expect(ex().testGetMissingRequiredKeys('execute_tool', undefined as any)).toEqual(['tool_name', 'params']);
+  });
+
+  it('fails open for a tool with no required array', () => {
+    expect(ex().testGetMissingRequiredKeys('update_contact', {})).toEqual([]);
+  });
+
+  it('fails open for an unknown tool', () => {
+    expect(ex().testGetMissingRequiredKeys('no_such_tool', {})).toEqual([]);
+  });
+
+  it('handleToolCalls refuses dispatch — the miskeyed-args incident, reproduced', async () => {
+    let called = false;
+    const router = {
+      execute_tool: { execute: async () => { called = true; return { completed: true }; } },
+    };
+    const executor = new TestExecutor(makeConfig(toolManifest(), { toolRouter: router }));
+    const results = await executor.testHandleToolCalls([
+      {
+        id: 't1', name: 'execute_tool',
+        // The exact live shape: `parameters` instead of `params`.
+        args: { tool_name: 'create_calendar_event', parameters: { title: 'BMPRSS Spirit Day', calendar: 'personal' } },
+      },
+    ]);
+    expect(called).toBe(false);
+    expect(results[0].content.completed).toBe(false);
+    expect(results[0].content.error).toBe(true);
+    expect(results[0].content.missingRequired).toEqual(['params']);
+    expect(results[0].content.message).toEqual(expect.stringContaining('params'));
+    expect(results[0].content.message).toEqual(expect.stringContaining('parameters'));
+    expect(results[0].content.message).toEqual(expect.stringContaining('NOT executed'));
+  });
+
+  it('handleToolCalls dispatches normally once every required key is present', async () => {
+    let received: any;
+    const router = {
+      execute_tool: { execute: async (args: any) => { received = args; return { completed: true }; } },
+    };
+    const executor = new TestExecutor(makeConfig(toolManifest(), { toolRouter: router }));
+    const results = await executor.testHandleToolCalls([
+      { id: 't1', name: 'execute_tool', args: { tool_name: 'create_calendar_event', params: { title: 'BMPRSS Spirit Day' } } },
+    ]);
+    expect(received).toEqual({ tool_name: 'create_calendar_event', params: { title: 'BMPRSS Spirit Day' } });
+    expect(results[0].content).toEqual({ completed: true });
   });
 });
 
