@@ -106,6 +106,21 @@ describe('OpenAIExecutor reasoning-family routing (/v1/responses)', () => {
     }
   });
 
+  it('routes gpt-6-astra (and its -latest alias form) to responses.create, stripping temperature', async () => {
+    for (const model of ['gpt-6-astra', 'gpt-6-astra-latest', 'gpt-6']) {
+      stubResponses();
+      const ex = new OpenAIExecutor(makeConfig('openai', model, { temperature: 0.7, reasoning_effort: 'high' }));
+      await ex.invoke([{ role: 'user', content: 'hi' }]);
+
+      expect(openaiResponsesCreate).toHaveBeenCalledTimes(1);
+      expect(openaiChatCreate).not.toHaveBeenCalled();
+      const sent = openaiResponsesCreate.mock.calls[0][0];
+      expect(sent.temperature).toBeUndefined();
+      expect(sent.reasoning).toEqual({ effort: 'high' });
+      vi.clearAllMocks();
+    }
+  });
+
   it('translates reasoning_effort -> reasoning.effort and verbosity -> text.verbosity', async () => {
     stubResponses();
     const ex = new OpenAIExecutor(

@@ -329,6 +329,95 @@ describe('calculateCost — cache-aware, provider-agnostic', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// calculateCost — token-range ("cliff") pricing tiers (GPT-6 Astra and friends)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('calculateCost — token-range pricing tiers', () => {
+  // Shaped like the real GPT-6 Astra catalog row: base ≤272K tier, then a
+  // single overflow tier at 2× input/cache and 1.5× output.
+  const astraPricing = {
+    provider: 'openai',
+    name: 'gpt-6-astra',
+    inputTokensPer1M: 10,
+    outputTokensPer1M: 50,
+    cacheCreationTokensPer1M: 12.5,
+    cacheReadTokensPer1M: 1,
+    currency: 'USD',
+    tiers: [
+      { thresholdInputTokens: 272_000, inputTokensPer1M: 20, outputTokensPer1M: 75, cacheCreationTokensPer1M: 25, cacheReadTokensPer1M: 2 },
+    ],
+  };
+
+  function exWith(modelPricing?: any) {
+    return new TestExecutor(makeConfig(makeManifest(), { modelPricing, logLevel: 'silent' }));
+  }
+
+  it('at or below the threshold, bills at the base (flat) rates', () => {
+    const ex = exWith(astraPricing);
+    const cost = ex.testCalculateCost({ input_tokens: 272_000 }, 1_000_000);
+    // exactly AT the threshold is still base tier — the cliff is "exceeds", not "reaches"
+    // 0.272*10 + 1*50 = 52.72
+    expect(cost).toBeCloseTo(52.72, 6);
+  });
+
+  it('one token past the threshold reprices the ENTIRE request, not just the overage', () => {
+    const ex = exWith(astraPricing);
+    const cost = ex.testCalculateCost({ input_tokens: 272_001 }, 1_000_000);
+    // 0.272001*20 + 1*75 ≈ 80.44002 — every input token bills at 20, not just token #272,001
+    expect(cost).toBeCloseTo(0.272001 * 20 + 75, 6);
+  });
+
+  it('applies the overflow tier to cache buckets too, not just input/output', () => {
+    const ex = exWith(astraPricing);
+    const cost = ex.testCalculateCost(
+      { input_tokens: 0, cache_creation_input_tokens: 200_000, cache_read_input_tokens: 100_000 },
+      0
+    );
+    // total input tokens = 300,000 > 272,000 → overflow tier: 0.2*25 + 0.1*2 = 5.2
+    expect(cost).toBeCloseTo(5.2, 6);
+  });
+
+  it('a model with no tiers is unaffected regardless of token volume (no regression)', () => {
+    const ex = exWith({
+      provider: 'anthropic', name: 'claude-sonnet-5',
+      inputTokensPer1M: 3, outputTokensPer1M: 15,
+      cacheCreationTokensPer1M: 3.75, cacheReadTokensPer1M: 0.3, currency: 'USD',
+    });
+    const cost = ex.testCalculateCost({ input_tokens: 5_000_000 }, 0);
+    // Huge volume, but no tiers array at all → flat base rate throughout.
+    expect(cost).toBeCloseTo(15, 6);
+  });
+
+  it('the numeric-input overload also resolves tiers (no cache buckets)', () => {
+    const ex = exWith(astraPricing);
+    const cost = ex.testCalculateCost(300_000, 0);
+    // 300,000 > 272,000 → overflow input rate 20: 0.3*20 = 6
+    expect(cost).toBeCloseTo(6, 6);
+  });
+
+  it('is ORDER-INDEPENDENT: with two tiers, the array order does not decide which one wins', () => {
+    // A hand-edited catalog row, or an admin UI that doesn't enforce sort
+    // order, must not silently pick the wrong tier just because of array
+    // position — resolvePricingTier() picks the highest threshold exceeded,
+    // not "the last one in the array."
+    const ascendingTiers = {
+      provider: 'openai', name: 'gpt-6-astra', inputTokensPer1M: 10, outputTokensPer1M: 50, currency: 'USD',
+      tiers: [
+        { thresholdInputTokens: 100_000, inputTokensPer1M: 15, outputTokensPer1M: 60 },
+        { thresholdInputTokens: 272_000, inputTokensPer1M: 20, outputTokensPer1M: 75 },
+      ],
+    };
+    const descendingTiers = { ...ascendingTiers, tiers: [...ascendingTiers.tiers].reverse() };
+
+    const costAscending = exWith(ascendingTiers).testCalculateCost({ input_tokens: 300_000 }, 1_000_000);
+    const costDescending = exWith(descendingTiers).testCalculateCost({ input_tokens: 300_000 }, 1_000_000);
+    // 0.3*20 + 1*75 = 81 — the 272K tier (highest exceeded), regardless of array order
+    expect(costAscending).toBeCloseTo(81, 6);
+    expect(costDescending).toBeCloseTo(costAscending, 6);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // normalizeToolArgs — schema-aware stringified arg coercion (direct-call boundary)
 // ─────────────────────────────────────────────────────────────────────────────
 

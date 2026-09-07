@@ -29,6 +29,10 @@ const REASONING_FAMILY_MODEL_PATTERNS: RegExp[] = [
   /^o3(-|$)/i,
   /^o4(-|$)/i,
   /^gpt-5([.-]|$)/i,
+  // GPT-6 Astra (gpt-6-astra) — same reasoning-family constraints as gpt-5.x:
+  // no temperature/top_p/etc, reasoning.effort instead. Verified 2026-09
+  // against developers.openai.com/api/docs/models/gpt-6-astra.
+  /^gpt-6([.-]|$)/i,
 ];
 
 function isReasoningFamilyModel(model: string): boolean {
