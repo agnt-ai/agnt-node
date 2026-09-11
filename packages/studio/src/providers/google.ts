@@ -62,16 +62,19 @@ export default class GoogleExecutor extends BaseExecutor {
       const tools = this.#formatTools(options.tools);
       modelConfig.tools = tools;
 
-      // Handle tool_choice
-      if (options.tool_choice === 'required') {
-        // Gemini doesn't have a direct equivalent to "required"
-        // We'll use function calling mode ANY — which forces a function call
-        // and allows parallel calls (Gemini parallelizes by default; no
-        // disable flag).
+      // Unlike every other adapter, this only recognized the bare string
+      // 'required' — a named forced choice (the OpenAI-shape object
+      // BaseExecutor.normalizeToolChoice produces, e.g. `initialToolChoice:
+      // 'submit_review'`) silently left toolConfig unset, so Gemini defaulted
+      // to AUTO and could answer in prose with no error.
+      if (options.tool_choice && options.tool_choice !== 'auto') {
+        const forcedName = this.#extractForcedToolName(options.tool_choice);
         modelConfig.toolConfig = {
-          functionCallingConfig: {
-            mode: 'ANY'
-          }
+          // mode 'ANY' still allows parallel calls; allowedFunctionNames pins
+          // it to the one forced tool when a specific name was given.
+          functionCallingConfig: forcedName
+            ? { mode: 'ANY', allowedFunctionNames: [forcedName] }
+            : { mode: 'ANY' }
         };
       }
     }
@@ -312,6 +315,16 @@ export default class GoogleExecutor extends BaseExecutor {
     }
 
     return parts;
+  }
+
+  // Handles both the normalized OpenAI shape and the Anthropic shape, since
+  // a cross-provider fallback chain can hand this either one.
+
+  #extractForcedToolName(toolChoice: any): string | null {
+    if (!toolChoice || typeof toolChoice === 'string') return null;
+    if (toolChoice.type === 'function' && toolChoice.function?.name) return toolChoice.function.name;
+    if (toolChoice.type === 'tool' && toolChoice.name) return toolChoice.name;
+    return null;
   }
 
   /**
