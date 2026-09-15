@@ -939,9 +939,8 @@ describe('getMissingRequiredKeys — required keys absent after stripping are ca
 
   // A required key can be *present* yet effectively missing — an explicit
   // `params: null` is the same failure mode as a dropped `params` key, just
-  // phrased differently. Matches agnt-backend's
-  // primeRunner.mjs#enforceLoadedToolParams convention: undefined/null/''
-  // count as missing for required params; false/0 (legitimately falsy) do not.
+  // phrased differently. undefined/null count as missing; false/0 and ''
+  // (legitimately falsy VALUES a caller can mean) do not.
   it('flags a required key explicitly set to null as missing', () => {
     expect(ex().testGetMissingRequiredKeys('execute_tool', { tool_name: 'create_task', params: null })).toEqual(['params']);
   });
@@ -950,8 +949,14 @@ describe('getMissingRequiredKeys — required keys absent after stripping are ca
     expect(ex().testGetMissingRequiredKeys('execute_tool', { tool_name: 'create_task', params: undefined })).toEqual(['params']);
   });
 
-  it('flags a required key explicitly set to an empty string as missing', () => {
-    expect(ex().testGetMissingRequiredKeys('execute_tool', { tool_name: '', params: {} })).toEqual(['tool_name']);
+  // Regression: '' is a VALUE, not an absence. This check briefly counted it as
+  // missing (mirroring agnt-backend's execute_tool-scoped, warn-only
+  // enforceLoadedToolParams without its scope or posture), which bounced
+  // `finish_agent_run({ message: '' })` — the documented way a Prime run ends
+  // its turn silently — as "missing required parameter(s): message", leaving
+  // the run unterminated. Seen twice live (2026-09-08, 2026-09-11).
+  it('does NOT flag a required key explicitly set to an empty string', () => {
+    expect(ex().testGetMissingRequiredKeys('execute_tool', { tool_name: '', params: {} })).toEqual([]);
   });
 
   it('does NOT flag a required key that is legitimately false or 0', () => {
@@ -1003,6 +1008,43 @@ describe('getMissingRequiredKeys — required keys absent after stripping are ca
     expect(results[0].content.message).toEqual(expect.stringContaining('params'));
     expect(results[0].content.message).toEqual(expect.stringContaining('parameters'));
     expect(results[0].content.message).toEqual(expect.stringContaining('NOT executed'));
+  });
+
+  // The live regression this pairs with: a terminator whose only param is
+  // required and deliberately empty must still TERMINATE. Bouncing it left the
+  // run alive with no way to end its turn.
+  it('handleToolCalls dispatches a required param that is deliberately an empty string', async () => {
+    const manifest = makeManifest({
+      spec: {
+        routingStrategy: 'fallback',
+        enableToolCalls: true,
+        variables: [],
+        files: [],
+        models: [{ provider: 'anthropic', model: 'claude-sonnet-4-5' }],
+        dependencies: [],
+        tools: [
+          {
+            name: 'finish_agent_run',
+            description: 'signal completion',
+            parameters: {
+              type: 'object',
+              properties: { message: { type: 'string' } },
+              required: ['message'],
+            },
+          },
+        ],
+      },
+    } as any);
+    let received: any;
+    const router = {
+      finish_agent_run: { execute: async (args: any) => { received = args; return { completed: true }; } },
+    };
+    const executor = new TestExecutor(makeConfig(manifest, { toolRouter: router }));
+    const results = await executor.testHandleToolCalls([
+      { id: 't1', name: 'finish_agent_run', args: { message: '' } },
+    ]);
+    expect(received).toEqual({ message: '' });
+    expect(results[0].content).toEqual({ completed: true });
   });
 
   it('handleToolCalls dispatches normally once every required key is present', async () => {
