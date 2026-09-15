@@ -1174,20 +1174,32 @@ export default class BaseExecutor {
    * check against.
    *
    * A required key is treated as missing if it's absent from `args` OR its
-   * value is `undefined`, `null`, or `''` — an explicit `params: null` is
+   * value is `undefined` or `null` — an explicit `params: null` is
    * functionally the same failure mode as a dropped `params` key, just
-   * phrased differently. This mirrors agnt-backend's
-   * `primeRunner.mjs#enforceLoadedToolParams`, which treats the same three
-   * values as "missing" for required params. Legitimately falsy-but-present
-   * values (`false`, `0`) are deliberately NOT flagged — only these three
-   * "missing-in-spirit" values are, same as that convention.
+   * phrased differently. Legitimately falsy-but-present values (`false`, `0`)
+   * are deliberately NOT flagged.
+   *
+   * `''` is NOT treated as missing, and that is deliberate. It was, briefly:
+   * the check was widened to match agnt-backend's
+   * `primeRunner.mjs#enforceLoadedToolParams`, which does count '' as absent.
+   * Copying that predicate was a mistake, because its SCOPE and POSTURE did
+   * not come with it — there it is execute_tool-scoped and warn-only by
+   * default (EXECUTE_TOOL_PARAM_ENFORCEMENT), whereas here it gates every
+   * direct tool call and hard-refuses dispatch. The difference bit on
+   * `finish_agent_run({ message: '' })`, which is how a Prime run is told to
+   * end its turn silently (an escalate handoff, a post-create_task finish):
+   * the call bounced as "missing required parameter(s): message" and the run
+   * was never terminated — observed twice on a live iMessage 1:1
+   * (2026-09-08, 2026-09-11), once derailing into unrelated work and a panic
+   * ack. An empty string is a VALUE a caller can mean; only an absent key and
+   * its two null-ish spellings are missing.
    */
   protected getMissingRequiredKeys(name: string, args: Record<string, any>): string[] {
     const def = this.allToolDefs.find(d => d.function?.name === name);
     const required = def?.function?.parameters?.required;
     if (!Array.isArray(required) || required.length === 0) return [];
     if (!args || typeof args !== 'object' || Array.isArray(args)) return [...required];
-    return required.filter(k => !(k in args) || args[k] === undefined || args[k] === null || args[k] === '');
+    return required.filter(k => !(k in args) || args[k] === undefined || args[k] === null);
   }
 
   // Executes exactly one tool call and returns its result content. This is the
