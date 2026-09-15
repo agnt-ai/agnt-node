@@ -1,29 +1,86 @@
 /**
- * AzureFoundryExecutor — provider adapter for Azure AI Foundry's unified
- * Model Inference API.
+ * AzureFoundryExecutor — provider adapter for Azure AI Foundry.
  *
- * Foundry's chat-completions endpoint speaks the OpenAI wire format (same
- * request/response shape as OpenAICompatibleExecutor), but auth is different:
- * a per-resource `endpoint`, an `api-key` header (not a bearer token), and a
- * required `api-version` query param on every call — so it gets its own
- * adapter rather than joining the OPENAI_COMPATIBLE_BASE_URLS registry.
+ * Foundry fronts TWO distinct wire APIs behind the same "endpoint" concept,
+ * and this adapter has to pick the right one per account:
  *
- * One Foundry resource can host OpenAI, Llama, Mistral, DeepSeek, and
- * Anthropic Claude models side by side — model selection is just the `model`
- * field in the request body (the Foundry deployment name), same as any other
- * OpenAI-wire provider.
+ *  - Model Inference API (non-OpenAI models — Llama, Mistral, DeepSeek,
+ *    Claude): `{endpoint}/models/chat/completions?api-version=...`, a
+ *    per-resource `api-key` header, and a required dated `api-version` query
+ *    param. Same request/response shape as OpenAICompatibleExecutor.
+ *
+ *  - Azure OpenAI v1 API (real OpenAI models — gpt-4o, gpt-5.x, gpt-6.x):
+ *    `{endpoint}/openai/v1`, no `api-version` param at all (deprecated by
+ *    the v1 API — see api-version-lifecycle docs). This is the ONLY surface
+ *    a gpt-5.x/gpt-6.x deployment answers on Foundry; the Model Inference
+ *    API 400s/404s for it regardless of api-version. We detect this mode by
+ *    the credentials' `endpoint` containing `/openai/v1` — the exact value
+ *    Azure's own portal shows as "the openai endpoint" for these models.
+ *
+ * v1 mode additionally requires routing gpt-5.x/gpt-6.x through the
+ * Responses API rather than Chat Completions: OpenAI's reasoning family
+ * rejects function tools + reasoning_effort together on Chat Completions
+ * (see openai.ts's identical REASONING_FAMILY_MODEL_PATTERNS /
+ * #invokeResponses — Azure serves the exact same models, so the exact same
+ * restriction applies). Mirrors that implementation; kept as its own copy
+ * per this file's existing precedent of not sharing provider logic (see
+ * openaiCompatible.ts's near-identical duplication note).
  */
 
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
-import { streamWithRetry, consumeOpenAIStream, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
+import {
+  streamWithRetry,
+  consumeOpenAIStream,
+  consumeOpenAIResponsesStream,
+  STREAM_ABSOLUTE_BACKSTOP_MS,
+} from './streaming.js';
 
-/** Default API version used when credentials.azureFoundry.apiVersion is omitted. */
+/** Default API version used when credentials.azureFoundry.apiVersion is omitted
+ *  AND the endpoint is NOT a v1-style endpoint (Model Inference API only). */
 const DEFAULT_AZURE_FOUNDRY_API_VERSION = '2024-05-01-preview';
+
+/** Same reasoning-family detection as openai.ts — Azure hosts the identical
+ *  models, so the identical Chat-Completions-vs-Responses split applies. */
+const REASONING_FAMILY_MODEL_PATTERNS: RegExp[] = [
+  /^o1(-|$)/i,
+  /^o3(-|$)/i,
+  /^o4(-|$)/i,
+  /^gpt-5([.-]|$)/i,
+  /^gpt-6([.-]|$)/i,
+];
+
+function isReasoningFamilyModel(model: string): boolean {
+  const normalized = model || '';
+  return REASONING_FAMILY_MODEL_PATTERNS.some(pattern => pattern.test(normalized));
+}
+
+/** Same rejected-params list as openai.ts's Responses builder. */
+const REASONING_UNSUPPORTED_SAMPLING_PARAMS = [
+  'temperature',
+  'top_p',
+  'frequency_penalty',
+  'presence_penalty',
+  'logit_bias',
+  'n',
+  'logprobs',
+  'top_logprobs',
+];
+
+/** Same translated-metadata-keys list as openai.ts's Responses builder. */
+const RESPONSES_TRANSLATED_METADATA_KEYS = [
+  'displayName',
+  'reasoning_effort',
+  'verbosity',
+  'max_tokens',
+  'max_completion_tokens',
+  'max_output_tokens',
+];
 
 export default class AzureFoundryExecutor extends BaseExecutor {
   private client: OpenAI;
+  private isV1Api: boolean;
 
   constructor(config: BaseExecutorConfig) {
     super(config);
@@ -39,7 +96,25 @@ export default class AzureFoundryExecutor extends BaseExecutor {
       throw new Error('[AzureFoundryExecutor] credentials.azureFoundry.endpoint is required');
     }
 
-    const apiVersion = creds.apiVersion || DEFAULT_AZURE_FOUNDRY_API_VERSION;
+    // Normalize away whatever trailing path the portal's copy-paste endpoint
+    // carries (`/responses`, `/chat/completions`, or nothing) down to the
+    // resource root, then detect which wire API this endpoint targets.
+    const trimmed = creds.endpoint.replace(/\/$/, '');
+    const v1Match = trimmed.match(/^(.*\/openai\/v1)(?:\/(?:responses|chat\/completions))?$/i);
+    this.isV1Api = Boolean(v1Match);
+
+    let baseURL: string;
+    let apiVersion: string | undefined;
+    if (this.isV1Api) {
+      // v1 GA API: no api-version param at all (see api-version-lifecycle —
+      // "api-version is no longer a required parameter with the v1 GA API").
+      // Any apiVersion configured on the account is meaningless here and
+      // intentionally ignored rather than sent and silently ignored by Azure.
+      baseURL = v1Match![1];
+    } else {
+      baseURL = `${trimmed}/models`;
+      apiVersion = creds.apiVersion || DEFAULT_AZURE_FOUNDRY_API_VERSION;
+    }
 
     // invoke() STREAMS and bounds the response with an inter-chunk IDLE timeout
     // (see streaming.ts), so a long-but-progressing turn never races a total-
@@ -51,15 +126,19 @@ export default class AzureFoundryExecutor extends BaseExecutor {
       // alongside our explicit `api-key` header below — Foundry only looks at
       // `api-key` and ignores the extra Bearer header, so this is harmless.
       apiKey: creds.apiKey,
-      baseURL: `${creds.endpoint.replace(/\/$/, '')}/models`,
+      baseURL,
       defaultHeaders: { 'api-key': creds.apiKey },
-      defaultQuery: { 'api-version': apiVersion },
+      ...(apiVersion ? { defaultQuery: { 'api-version': apiVersion } } : {}),
       maxRetries: 3,
       timeout: STREAM_ABSOLUTE_BACKSTOP_MS,
       dangerouslyAllowBrowser: creds.dangerouslyAllowBrowser,
     });
 
-    this.log(`[AzureFoundryExecutor] Initialized @ ${creds.endpoint} (api-version ${apiVersion}) with model: ${this.model}`);
+    this.log(
+      `[AzureFoundryExecutor] Initialized @ ${baseURL} ` +
+      `(${this.isV1Api ? 'v1 API, no api-version' : `api-version ${apiVersion}`}) ` +
+      `with model: ${this.model}`
+    );
   }
 
   /**
@@ -67,6 +146,14 @@ export default class AzureFoundryExecutor extends BaseExecutor {
    * Returns: { message: { role, content, tool_calls }, usage: {...disjoint buckets} }
    */
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
+    // Reasoning-family models (gpt-5.x, gpt-6.x) only answer tool calls +
+    // reasoning_effort on the Responses API — identical restriction to
+    // direct OpenAI (see openai.ts). The Model Inference API (`/models`) has
+    // no Responses equivalent, so this only applies in v1 mode.
+    if (this.isV1Api && isReasoningFamilyModel(this.model)) {
+      return this.#invokeResponses(messages, options);
+    }
+
     const params: any = {
       model: this.model,
       messages: this.#formatMessages(messages),
@@ -288,5 +375,210 @@ export default class AzureFoundryExecutor extends BaseExecutor {
     if (cfg.temperature != null) params.temperature = cfg.temperature;
     if (cfg.maxTokens != null) params.max_tokens = cfg.maxTokens;
     return { ...params, ...metadataParams };
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Responses API path (v1 mode, gpt-5.x/gpt-6.x only) — ported from
+  // OpenAIExecutor's identical implementation. See class doc comment.
+  // ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * Invoke the Responses API (`{v1BaseURL}/responses`) for reasoning-family
+   * models. Same streamed idle-guard contract as the Chat Completions path —
+   * only the request shape (input items instead of `messages`, flat function
+   * tools, `reasoning.effort`/`text.verbosity`/`max_output_tokens`) and the
+   * response shape (an `output[]` of items instead of `choices[0].message`)
+   * differ.
+   */
+  async #invokeResponses(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
+    const params = this.#buildResponsesRequest(messages, options);
+
+    this.log('[AzureFoundryExecutor] Invoking (responses):', {
+      model: params.model,
+      effort: params.reasoning?.effort,
+      tools: params.tools?.length || 0,
+    });
+
+    const response = await streamWithRetry(
+      async (guard) => {
+        const stream = await this.client.responses.create(
+          { ...params, stream: true } as any,
+          { signal: guard.signal }
+        );
+        return await consumeOpenAIResponsesStream(stream as any, () => guard.bump());
+      },
+      {
+        externalSignal: options.signal,
+        isRetryable: (err) => this.isRetryableError(err),
+        log: (m) => this.log(m),
+      }
+    );
+
+    return this.#formatResponsesResult(response);
+  }
+
+  /** Build the `/responses` request from canonical messages + invoke options.
+   *  See openai.ts's identical method for the full rationale. */
+  #buildResponsesRequest(messages: Message[], options: InvokeOptions): Record<string, any> {
+    const metadata = (this.primaryModelConfig as any).metadata || {};
+
+    const params: Record<string, any> = {
+      model: this.model,
+      input: this.#formatResponsesInput(messages),
+      store: false,
+    };
+
+    for (const [key, value] of Object.entries(metadata)) {
+      if (RESPONSES_TRANSLATED_METADATA_KEYS.includes(key)) continue;
+      if (REASONING_UNSUPPORTED_SAMPLING_PARAMS.includes(key)) continue;
+      params[key] = value;
+    }
+
+    if (metadata.reasoning_effort) {
+      params.reasoning = { ...(params.reasoning || {}), effort: metadata.reasoning_effort };
+    }
+    if (metadata.verbosity) {
+      params.text = { ...(params.text || {}), verbosity: metadata.verbosity };
+    }
+    const maxOut = metadata.max_output_tokens ?? metadata.max_completion_tokens ?? metadata.max_tokens;
+    if (maxOut != null) {
+      params.max_output_tokens = maxOut;
+    }
+
+    if (options.tools && options.tools.length > 0) {
+      params.tools = options.tools.map(t => this.#formatResponsesTool(t));
+      params.parallel_tool_calls = true;
+    }
+
+    if (options.tool_choice && options.tool_choice !== 'auto') {
+      params.tool_choice = this.#formatResponsesToolChoice(options.tool_choice);
+    }
+
+    return params;
+  }
+
+  /** Canonical messages → Responses `input` items. */
+  #formatResponsesInput(messages: Message[]): any[] {
+    const input: any[] = [];
+
+    for (const msg of messages) {
+      if (msg.role === 'tool') {
+        input.push({
+          type: 'function_call_output',
+          call_id: msg.tool_call_id,
+          output:
+            typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
+        });
+        continue;
+      }
+
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        if (msg.content) {
+          input.push({ role: 'assistant', content: this.#formatResponsesContent(msg.content, 'assistant') });
+        }
+        for (const tc of msg.tool_calls) {
+          input.push({
+            type: 'function_call',
+            call_id: tc.id,
+            name: tc.name,
+            arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
+          });
+        }
+        continue;
+      }
+
+      input.push({
+        role: msg.role,
+        content: this.#formatResponsesContent(msg.content, msg.role),
+      });
+    }
+
+    return input;
+  }
+
+  /** Normalize message content for a Responses input item. */
+  #formatResponsesContent(content: string | any[], role: Message['role']): any {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return content ?? '';
+
+    const textType = role === 'assistant' ? 'output_text' : 'input_text';
+    return content.map(part => {
+      if (!part || typeof part !== 'object') return part;
+      if (part.type === 'text' || part.type === 'input_text' || part.type === 'output_text') {
+        return { type: textType, text: part.text ?? '' };
+      }
+      if (part.type === 'image_url') {
+        const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+        return { type: 'input_image', image_url: url };
+      }
+      return part;
+    });
+  }
+
+  /** Format a tool definition for the Responses API (flat, not nested under `function`). */
+  #formatResponsesTool(tool: any): any {
+    const fn = tool?.function ?? tool;
+    const parameters = fn.parameters ?? tool.input_schema ?? { type: 'object', properties: {} };
+    return {
+      type: 'function',
+      name: fn.name ?? tool.name ?? 'unknown',
+      description: fn.description ?? tool.description ?? '',
+      parameters,
+      strict: false,
+    };
+  }
+
+  /** Format tool_choice for the Responses API. */
+  #formatResponsesToolChoice(toolChoice: any): any {
+    if (typeof toolChoice === 'string') {
+      if (toolChoice === 'required' || toolChoice === 'any') return 'required';
+      if (toolChoice === 'none') return 'none';
+      return 'auto';
+    }
+    const name = toolChoice?.function?.name ?? toolChoice?.name;
+    if (name) return { type: 'function', name };
+    return 'auto';
+  }
+
+  /** Map a terminal Responses `output[]` + usage back into the executor's InvokeResult. */
+  #formatResponsesResult(response: any): InvokeResult {
+    let content = '';
+    const tool_calls: Array<{ id: string; name: string; args: Record<string, any> }> = [];
+
+    for (const item of response?.output ?? []) {
+      if (item?.type === 'message') {
+        for (const part of item.content ?? []) {
+          if (part?.type === 'output_text' && typeof part.text === 'string') content += part.text;
+          else if (part?.type === 'refusal' && typeof part.refusal === 'string') content += part.refusal;
+        }
+      } else if (item?.type === 'function_call') {
+        let args: Record<string, any> = {};
+        try {
+          args = JSON.parse(item.arguments || '{}');
+        } catch {
+          this.log(`[AzureFoundryExecutor] tool "${item.name}" returned unparseable arguments; using {}:`, item.arguments);
+        }
+        tool_calls.push({ id: item.call_id, name: item.name, args });
+      }
+    }
+
+    const usage = response?.usage ?? {};
+    const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
+    const inputTokens = usage.input_tokens ?? 0;
+    const outputTokens = usage.output_tokens ?? 0;
+
+    return {
+      message: {
+        role: 'assistant',
+        content,
+        tool_calls,
+      },
+      usage: {
+        input_tokens: Math.max(0, inputTokens - cachedTokens),
+        output_tokens: outputTokens,
+        cache_read_input_tokens: cachedTokens,
+        cache_creation_input_tokens: 0,
+      },
+    };
   }
 }

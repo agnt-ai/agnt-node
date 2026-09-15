@@ -64,6 +64,72 @@ describe('AzureFoundryExecutor — construction', () => {
     } as any);
     expect((ex as any).client._options.defaultQuery['api-version']).toBe('2025-01-01-preview');
   });
+
+  // v1 endpoint mode (gpt-5.x/6.x deployments only answer here — see
+  // azureFoundryV1Routing.test.ts for the reasoning-family routing this
+  // detection feeds). Regression coverage for the 2026-09-14 prod incident:
+  // these deployments 400'd/404'd against the Model Inference API regardless
+  // of api-version, and the portal's own "openai endpoint" copy-paste value
+  // carries a trailing /responses or /chat/completions this adapter must
+  // strip down to the true v1 baseURL.
+  it('detects a bare /openai/v1 endpoint as v1 mode with no api-version query', () => {
+    const ex = new AzureFoundryExecutor({
+      manifest: makeManifest('gpt-5.6-luna'),
+      credentials: { azureFoundry: { apiKey: 'sk-test', endpoint: 'https://my-resource.services.ai.azure.com/openai/v1' } },
+      logLevel: 'silent',
+    } as any);
+    const client = (ex as any).client;
+    expect(client.baseURL).toBe('https://my-resource.services.ai.azure.com/openai/v1');
+    expect(client._options.defaultQuery).toBeUndefined();
+  });
+
+  it('strips a /openai/v1/responses endpoint (the Foundry portal\'s copy-paste value) to the v1 baseURL', () => {
+    const ex = new AzureFoundryExecutor({
+      manifest: makeManifest('gpt-5.6-luna'),
+      credentials: { azureFoundry: { apiKey: 'sk-test', endpoint: 'https://my-resource.services.ai.azure.com/openai/v1/responses' } },
+      logLevel: 'silent',
+    } as any);
+    const client = (ex as any).client;
+    expect(client.baseURL).toBe('https://my-resource.services.ai.azure.com/openai/v1');
+    expect(client._options.defaultQuery).toBeUndefined();
+  });
+
+  it('strips a /openai/v1/chat/completions endpoint to the v1 baseURL', () => {
+    const ex = new AzureFoundryExecutor({
+      manifest: makeManifest('gpt-4o'),
+      credentials: { azureFoundry: { apiKey: 'sk-test', endpoint: 'https://my-resource.services.ai.azure.com/openai/v1/chat/completions' } },
+      logLevel: 'silent',
+    } as any);
+    const client = (ex as any).client;
+    expect(client.baseURL).toBe('https://my-resource.services.ai.azure.com/openai/v1');
+    expect(client._options.defaultQuery).toBeUndefined();
+  });
+
+  it('ignores a configured apiVersion in v1 mode (the v1 GA API takes no api-version param)', () => {
+    const ex = new AzureFoundryExecutor({
+      manifest: makeManifest('gpt-5.6-luna'),
+      credentials: {
+        azureFoundry: {
+          apiKey: 'sk-test',
+          endpoint: 'https://my-resource.services.ai.azure.com/openai/v1',
+          apiVersion: '2025-04-01',
+        },
+      },
+      logLevel: 'silent',
+    } as any);
+    expect((ex as any).client._options.defaultQuery).toBeUndefined();
+  });
+
+  it('still defaults a project-scoped (non-v1) endpoint to the Model Inference API', () => {
+    const ex = new AzureFoundryExecutor({
+      manifest: makeManifest('llama-3'),
+      credentials: { azureFoundry: { apiKey: 'sk-test', endpoint: 'https://my-resource.services.ai.azure.com/api/projects/foo' } },
+      logLevel: 'silent',
+    } as any);
+    const client = (ex as any).client;
+    expect(client.baseURL).toBe('https://my-resource.services.ai.azure.com/api/projects/foo/models');
+    expect(client._options.defaultQuery['api-version']).toBe('2024-05-01-preview');
+  });
 });
 
 describe('AzureFoundryExecutor — invoke() response mapping', () => {
