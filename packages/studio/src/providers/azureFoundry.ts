@@ -97,9 +97,10 @@ export default class AzureFoundryExecutor extends BaseExecutor {
     }
 
     // Normalize away whatever trailing path the portal's copy-paste endpoint
-    // carries (`/responses`, `/chat/completions`, or nothing) down to the
+    // carries (`/responses`, `/chat/completions`, a `?api-version=...` query
+    // string some copy-paste sources leave attached, or nothing) down to the
     // resource root, then detect which wire API this endpoint targets.
-    const trimmed = creds.endpoint.replace(/\/$/, '');
+    const trimmed = creds.endpoint.replace(/[?#].*$/, '').replace(/\/+$/, '');
     const v1Match = trimmed.match(/^(.*\/openai\/v1)(?:\/(?:responses|chat\/completions))?$/i);
     this.isV1Api = Boolean(v1Match);
 

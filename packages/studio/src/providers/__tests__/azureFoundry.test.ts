@@ -120,6 +120,22 @@ describe('AzureFoundryExecutor — construction', () => {
     expect((ex as any).client._options.defaultQuery).toBeUndefined();
   });
 
+  it('strips a trailing query string (e.g. a copy-pasted ?api-version=...) before detecting v1 mode', () => {
+    const ex = new AzureFoundryExecutor({
+      manifest: makeManifest('gpt-5.6-luna'),
+      credentials: {
+        azureFoundry: {
+          apiKey: 'sk-test',
+          endpoint: 'https://my-resource.services.ai.azure.com/openai/v1/responses?api-version=2024-05-01-preview',
+        },
+      },
+      logLevel: 'silent',
+    } as any);
+    const client = (ex as any).client;
+    expect(client.baseURL).toBe('https://my-resource.services.ai.azure.com/openai/v1');
+    expect(client._options.defaultQuery).toBeUndefined();
+  });
+
   it('still defaults a project-scoped (non-v1) endpoint to the Model Inference API', () => {
     const ex = new AzureFoundryExecutor({
       manifest: makeManifest('llama-3'),
