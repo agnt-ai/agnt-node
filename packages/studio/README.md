@@ -89,7 +89,7 @@ An account-level API key (one created without a specific `userId`) sees everythi
 
 ### `agnt eval` — read Run Review evaluations
 
-Run Review scores finished runs from the user's point of view (did they get what they asked for, how did it feel) and is what agnt-console's Evaluation page shows. `agnt eval` puts the same three views in the terminal, so an agent can go from "how are runs doing" to one evaluation to the run behind it. Same profile setup as `agnt run`, but it **needs an account-level API key**: an evaluation is a cross-user view, so a user-scoped or org-scoped key is refused.
+Run Review scores finished runs from the user's point of view (did they get what they asked for, how did it feel) and is what agnt-console's Evaluation page shows. `agnt eval` puts the same three views in the terminal, so an agent can go from "how are runs doing" to one evaluation to the run behind it. Same profile setup as `agnt run`, but it **needs an unrestricted account-level API key** (created without a user, without an org and without scopes): an evaluation is a cross-user view, so a key tied to a user or an org, or limited to named scopes such as `tasks` and `chats`, is refused.
 
 ```bash
 # How runs are doing: averages, outcome and ending buckets, and the by-task-type table

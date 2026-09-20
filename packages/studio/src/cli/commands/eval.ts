@@ -8,9 +8,10 @@
  * `agnt run chat <chatId>` for the conversation, and the LangSmith query for
  * the trace.
  *
- * Needs an ACCOUNT-LEVEL API key (one created without a specific user), the same
- * kind that gives `agnt run` account-wide visibility. A user-scoped or
- * org-scoped key is refused: an evaluation is a cross-user view.
+ * Needs an UNRESTRICTED ACCOUNT-LEVEL API key: created without a specific user,
+ * without an org and without scopes. That is the kind that gives `agnt run`
+ * account-wide visibility. A key tied to a user or an org, or limited to named
+ * scopes, is refused: an evaluation is a cross-user view.
  *
  * Usage:
  *   agnt eval summary [--days 30] [--profile <name>] [--json]
@@ -27,11 +28,29 @@ import type { ListRunReviewsParams, RunReviewRecord, RunReviewSummary } from '..
 
 const DEFAULT_DAYS = 30;
 const DEFAULT_LIMIT = 25;
+/** The API clamps to these; asking for more would print a window or page size that was not served. */
+const MAX_DAYS = 365;
+const MAX_LIMIT = 100;
 const SNIPPET_LEN = 240;
 /** The list endpoint matches this `taskClass` value to reviews the judge left without a class. */
 const UNCLASSIFIED_TASK_CLASS = '__unclassified__';
 
 // ── rendering ────────────────────────────────────────────────────────────────
+
+/**
+ * Judge text is model output shaped by end-user content, and it lands in a
+ * terminal and in an agent's context. Drop control characters (escape
+ * sequences that retitle a terminal or clear the screen, carriage returns that
+ * overwrite a line), keeping newline and tab.
+ */
+export function stripControl(text: string): string {
+  return text.replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g, '');
+}
+
+/** Quote for a POSIX shell unless plainly safe, so a printed command is the command that was meant when it is pasted. */
+export function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
 
 function oneLine(text: unknown, max: number): string {
   const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
@@ -65,6 +84,12 @@ function duration(ms: number): string {
   return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+/** " (4m 12s)" when both ends parse and run forwards, otherwise nothing. */
+function spanOf(from: unknown, to: unknown): string {
+  const ms = new Date(String(to)).getTime() - new Date(String(from)).getTime();
+  return Number.isFinite(ms) && ms >= 0 ? ` (${duration(ms)})` : '';
+}
+
 function pctOf(count: number, total: number): string {
   return total ? `${Math.round((count / total) * 100)}%` : '0%';
 }
@@ -87,11 +112,11 @@ export function renderSummary(s: RunReviewSummary): string {
 
   const groups: Record<string, any>[] = s.byTaskClass ?? [];
   if (groups.length) {
-    const width = Math.max(...groups.map(g => String(g._id ?? 'unclassified').length));
+    const width = Math.max(...groups.map(g => String(g._id || 'unclassified').length));
     lines.push('', 'By task type:');
     for (const g of groups) {
       lines.push(
-        `  ${String(g._id ?? 'unclassified').padEnd(width)}  ${String(g.count).padStart(4)} runs  ` +
+        `  ${String(g._id || 'unclassified').padEnd(width)}  ${String(g.count).padStart(4)} runs  ` +
           `outcome ${g.avgOutcome?.toFixed(2) ?? '?'}  experience ${g.avgExperience?.toFixed(2) ?? '?'}  ` +
           `credits ${g.avgCredits?.toFixed(1) ?? '?'}`,
       );
@@ -109,14 +134,17 @@ export interface ListView {
   totalPages: number;
 }
 
-export function renderList(view: ListView, params: ListRunReviewsParams, nextPageHint: string | null): string {
+export function renderList(view: ListView, params: ListRunReviewsParams, pageHint: string | null): string {
   const lines: string[] = [];
   const { runReviews, page, perPage, total, totalPages } = view;
+  const pastEnd = total > 0 && page > totalPages;
   const first = total ? (page - 1) * perPage + 1 : 0;
   const last = Math.min(page * perPage, total);
   lines.push(
     `${total} review${total === 1 ? '' : 's'} (${params.sort === 'newest' ? 'newest' : 'worst'} first, last ${params.days ?? DEFAULT_DAYS} days)` +
-      (total ? `, showing ${first}-${last}, page ${page} of ${totalPages}` : ''),
+      (pastEnd
+        ? `, but page ${page} is past the last page (${totalPages})`
+        : total ? `, showing ${first}-${last}, page ${page} of ${totalPages}` : ''),
   );
 
   for (const r of runReviews) {
@@ -129,7 +157,7 @@ export function renderList(view: ListView, params: ListRunReviewsParams, nextPag
         `outcome ${score(v.outcomeScore)}${v.outcomeCategory ? ` ${v.outcomeCategory}` : ''}`,
         `experience ${score(v.experienceScore)}`,
         `ended ${v.userSentimentEnd ?? '?'}`,
-        v.taskClass ?? 'unclassified',
+        v.taskClass || 'unclassified',
       ].join('  '),
     );
     lines.push(
@@ -139,10 +167,8 @@ export function renderList(view: ListView, params: ListRunReviewsParams, nextPag
     if (v.userPerspective) lines.push(`    "${oneLine(v.userPerspective, SNIPPET_LEN)}"`);
   }
 
-  if (runReviews.length) {
-    lines.push('', 'Open one with: agnt eval get <reviewId>');
-    if (nextPageHint) lines.push(`Next page: ${nextPageHint}`);
-  }
+  if (runReviews.length) lines.push('', 'Open one with: agnt eval get <reviewId>');
+  if (pageHint) lines.push(...(runReviews.length ? [] : ['']), pageHint);
   return lines.join('\n');
 }
 
@@ -150,7 +176,7 @@ export function renderReview(r: RunReviewRecord): string {
   const v = r.review ?? {};
   const lines: string[] = [];
 
-  lines.push(`Review ${r._id}  ${v.taskClass ?? 'unclassified'}  ${stamp(r.reviewedAt)}`);
+  lines.push(`Review ${r._id}  ${v.taskClass || 'unclassified'}  ${stamp(r.reviewedAt)}`);
   lines.push(`User: ${personOf(r.user)}${r.originPlatform ? `   Platform: ${r.originPlatform}` : ''}`);
   lines.push(
     `Outcome ${score(v.outcomeScore)}${v.outcomeCategory ? ` (${v.outcomeCategory})` : ''}  ` +
@@ -194,7 +220,7 @@ export function renderReview(r: RunReviewRecord): string {
     r.turnCount != null && `${r.turnCount} turns`,
     r.toolCallCount != null && `${r.toolCallCount} tool calls`,
     r.creditsConsumed != null && `${r.creditsConsumed} credits`,
-    r.runStartedAt && `${stamp(r.runStartedAt)}${r.runCompletedAt ? ` to ${stamp(r.runCompletedAt)} (${duration(new Date(r.runCompletedAt).getTime() - new Date(r.runStartedAt).getTime())})` : ''}`,
+    r.runStartedAt && `${stamp(r.runStartedAt)}${r.runCompletedAt ? ` to ${stamp(r.runCompletedAt)}${spanOf(r.runStartedAt, r.runCompletedAt)}` : ''}`,
   ].filter(Boolean);
   if (facts.length) lines.push(`  ${facts.join(' · ')}`);
   if (r.task) {
@@ -222,17 +248,19 @@ function fail(err: any): never {
   console.error(message);
   if (/\((401|403)\)/.test(message)) {
     console.error(
-      'Evaluations need an account-level API key (one created without a specific user). ' +
-        'A user-scoped or org-scoped key is refused. Check the key behind this profile.',
+      'Evaluations need an unrestricted account-level API key: one created without a specific user, ' +
+        'without an org, and without scopes. A key tied to a user or an org, or limited to named scopes ' +
+        '(tasks, chats), is refused. An API that predates evaluations refuses every key.',
     );
   }
   process.exit(1);
 }
 
-function positiveInt(raw: string | undefined, flag: string, fallback: number): number {
+function positiveInt(raw: string | undefined, flag: string, fallback: number, max?: number): number {
   if (raw === undefined) return fallback;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1) throw new Error(`${flag} must be a positive whole number, got "${raw}"`);
+  if (max !== undefined && n > max) throw new Error(`${flag} must be at most ${max}, got ${n}`);
   return n;
 }
 
@@ -251,10 +279,10 @@ export interface EvalSummaryOptions {
 
 export async function evalSummary(opts: EvalSummaryOptions): Promise<void> {
   try {
-    const days = positiveInt(opts.days, '--days', DEFAULT_DAYS);
+    const days = positiveInt(opts.days, '--days', DEFAULT_DAYS, MAX_DAYS);
     const client = await clientFor(opts.profile);
     const summary = await client.getRunReviewSummary(days);
-    console.log(opts.json ? JSON.stringify({ summary }, null, 2) : renderSummary(summary));
+    console.log(opts.json ? JSON.stringify({ summary }, null, 2) : stripControl(renderSummary(summary)));
   } catch (err) {
     fail(err);
   }
@@ -276,19 +304,22 @@ export interface EvalListOptions {
 }
 
 /** The command line that fetches the next page: this one, with only --page changed. */
-function nextPageCommand(opts: EvalListOptions, nextPage: number): string {
+function nextPageCommand(opts: EvalListOptions, page: number): string {
   const parts = ['agnt eval list'];
-  if (opts.days) parts.push(`--days ${opts.days}`);
-  if (opts.taskClass) parts.push(`--task-class ${opts.taskClass}`);
+  const flag = (name: string, value: string | undefined) => {
+    if (value) parts.push(`--${name} ${shellQuote(value)}`);
+  };
+  flag('days', opts.days);
+  flag('task-class', opts.taskClass);
   if (opts.unclassified) parts.push('--unclassified');
-  if (opts.outcome) parts.push(`--outcome ${opts.outcome}`);
-  if (opts.sentiment) parts.push(`--sentiment ${opts.sentiment}`);
-  if (opts.minScore) parts.push(`--min-score ${opts.minScore}`);
-  if (opts.maxScore) parts.push(`--max-score ${opts.maxScore}`);
-  if (opts.sort) parts.push(`--sort ${opts.sort}`);
-  if (opts.limit) parts.push(`--limit ${opts.limit}`);
-  if (opts.profile) parts.push(`--profile ${opts.profile}`);
-  parts.push(`--page ${nextPage}`);
+  flag('outcome', opts.outcome);
+  flag('sentiment', opts.sentiment);
+  flag('min-score', opts.minScore);
+  flag('max-score', opts.maxScore);
+  flag('sort', opts.sort);
+  flag('limit', opts.limit);
+  flag('profile', opts.profile);
+  parts.push(`--page ${page}`);
   return parts.join(' ');
 }
 
@@ -299,9 +330,9 @@ export async function evalList(opts: EvalListOptions): Promise<void> {
     if (sort !== 'worst' && sort !== 'newest') throw new Error(`--sort must be "worst" or "newest", got "${sort}"`);
 
     const params: ListRunReviewsParams = {
-      days: positiveInt(opts.days, '--days', DEFAULT_DAYS),
+      days: positiveInt(opts.days, '--days', DEFAULT_DAYS, MAX_DAYS),
       page: positiveInt(opts.page, '--page', 1),
-      limit: positiveInt(opts.limit, '--limit', DEFAULT_LIMIT),
+      limit: positiveInt(opts.limit, '--limit', DEFAULT_LIMIT, MAX_LIMIT),
       sort,
       taskClass: opts.unclassified ? UNCLASSIFIED_TASK_CLASS : opts.taskClass,
       outcomeCategory: opts.outcome,
@@ -317,8 +348,10 @@ export async function evalList(opts: EvalListOptions): Promise<void> {
       console.log(JSON.stringify(view, null, 2));
       return;
     }
-    const hasNext = view.page < view.totalPages;
-    console.log(renderList(view, params, hasNext ? nextPageCommand(opts, view.page + 1) : null));
+    let pageHint: string | null = null;
+    if (view.page < view.totalPages) pageHint = `Next page: ${nextPageCommand(opts, view.page + 1)}`;
+    else if (view.total > 0 && view.page > view.totalPages) pageHint = `Last page: ${nextPageCommand(opts, view.totalPages)}`;
+    console.log(stripControl(renderList(view, params, pageHint)));
   } catch (err) {
     fail(err);
   }
@@ -333,7 +366,7 @@ export async function evalGet(reviewId: string, opts: EvalGetOptions): Promise<v
   try {
     const client = await clientFor(opts.profile);
     const runReview = await client.getRunReview(reviewId);
-    console.log(opts.json ? JSON.stringify({ runReview }, null, 2) : renderReview(runReview));
+    console.log(opts.json ? JSON.stringify({ runReview }, null, 2) : stripControl(renderReview(runReview)));
   } catch (err) {
     fail(err);
   }

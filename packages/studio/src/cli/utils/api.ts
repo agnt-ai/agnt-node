@@ -219,6 +219,9 @@ export class AgntApiClient {
       {},
       true
     );
+    if (!data?.summary || typeof data.summary !== 'object') {
+      throw new Error('Unexpected response from /account/run-reviews/summary: no summary');
+    }
     return data.summary;
   }
 
@@ -247,12 +250,17 @@ export class AgntApiClient {
       total: number;
       totalPages: number;
     }>(`/account/run-reviews${qs ? `?${qs}` : ''}`, {}, true);
+    if (!Array.isArray(data?.runReviews)) {
+      throw new Error('Unexpected response from /account/run-reviews: no runReviews list');
+    }
+    const perPage = data.perPage ?? params.limit ?? data.runReviews.length;
+    const total = data.total ?? data.runReviews.length;
     return {
       runReviews: data.runReviews,
-      page: data.page,
-      perPage: data.perPage,
-      total: data.total,
-      totalPages: data.totalPages,
+      page: data.page ?? params.page ?? 1,
+      perPage,
+      total,
+      totalPages: data.totalPages ?? (perPage ? Math.ceil(total / perPage) : 1),
     };
   }
 
@@ -266,6 +274,9 @@ export class AgntApiClient {
       {},
       true
     );
+    if (!data?.runReview || typeof data.runReview !== 'object') {
+      throw new Error(`Unexpected response from /account/run-reviews/${reviewId}: no runReview`);
+    }
     return data.runReview;
   }
 }

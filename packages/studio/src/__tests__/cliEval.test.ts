@@ -15,7 +15,7 @@ vi.mock('../cli/utils/credentials.js', () => ({
   resolveProfile: async () => ({ apiUrl: 'https://api.test/', apiKey: 'ak_live_test' }),
 }));
 
-import { evalGet, evalList, evalSummary } from '../cli/commands/eval.js';
+import { evalGet, evalList, evalSummary, shellQuote, stripControl } from '../cli/commands/eval.js';
 
 const TASK = '64b0000000000000aaaaaaaa';
 const CHAT = '64b0000000000000bbbbbbbb';
@@ -289,5 +289,141 @@ describe('agnt eval summary', () => {
     await evalSummary({});
     expect(printed()).toContain('0 reviewed');
     expect(printed()).not.toContain('By task type');
+  });
+});
+
+// ── hardening: what a review's text and a class name can do once printed ─────
+
+const ESC = String.fromCharCode(27);
+const BEL = String.fromCharCode(7);
+const CR = String.fromCharCode(13);
+const CONTROL = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/;
+
+describe('printed text is safe to paste and to display', () => {
+  it('shellQuote leaves plain values alone and quotes everything else', () => {
+    for (const plain of ['research_company', 'a.b-c:1', 'ak_live', '30']) expect(shellQuote(plain)).toBe(plain);
+    expect(shellQuote('research company')).toBe("'research company'");
+    expect(shellQuote('a; touch X')).toBe("'a; touch X'");
+    expect(shellQuote('$(id)')).toBe("'$(id)'");
+    expect(shellQuote("it's")).toBe("'it'\\''s'");
+    expect(shellQuote('')).toBe("''");
+  });
+
+  it('the next-page command quotes every value it repeats', async () => {
+    respond(page([review()], { page: 1, total: 60, totalPages: 3 }));
+    await evalList({ taskClass: 'research company; touch X', outcome: "it's", profile: 'my prof' });
+    expect(printed()).toContain("--task-class 'research company; touch X'");
+    expect(printed()).toContain("--outcome 'it'\\''s'");
+    expect(printed()).toContain("--profile 'my prof'");
+    expect(printed()).toContain('--page 2');
+  });
+
+  it('stripControl drops escapes, bells and carriage returns and keeps newline and tab', () => {
+    expect(stripControl(`a${ESC}[2Jb${BEL}c${CR}d\ne\tf`)).toBe('a[2Jbcd\ne\tf');
+  });
+
+  it('a review cannot retitle the terminal or clear the screen through its text', async () => {
+    const evil = `line one${ESC}]0;pwned${BEL}${ESC}[2J${CR}overwritten\nline two`;
+    const record = review({
+      review: { userPerspective: evil, whatUserWanted: evil, faultEvidence: evil, taskClass: `cls${ESC}[31m` },
+    });
+
+    respond(page([record]));
+    await evalList({});
+    expect(printed()).not.toMatch(CONTROL);
+    expect(printed()).toContain('overwritten');
+
+    out.length = 0;
+    respond({ ok: true, runReview: record });
+    await evalGet(REVIEW_ID, {});
+    expect(printed()).not.toMatch(CONTROL);
+    expect(printed()).toContain('line two');
+
+    out.length = 0;
+    respond({ ok: true, summary: { windowDays: 30, count: 1, wouldComplain: 0, byCategory: [{ _id: `x${ESC}[2J`, count: 1 }], bySentiment: [], byTaskClass: [] } });
+    await evalSummary({});
+    expect(printed()).not.toMatch(CONTROL);
+  });
+
+  it('--json escapes control characters rather than printing them raw', async () => {
+    respond(page([review({ review: { userPerspective: `x${ESC}[2Jy` } })]));
+    await evalList({ json: true });
+    expect(printed()).not.toMatch(CONTROL);
+    expect(JSON.parse(printed()).runReviews[0].review.userPerspective).toBe(`x${ESC}[2Jy`);
+  });
+});
+
+describe('the edges of a list and of a review', () => {
+  it('says a page past the end is past the end, and gives the last page', async () => {
+    respond(page([], { page: 9, total: 60, totalPages: 3 }));
+    await evalList({ page: '9', taskClass: 'research_company' });
+    expect(printed()).toContain('60 reviews');
+    expect(printed()).toContain('page 9 is past the last page (3)');
+    expect(printed()).not.toContain('showing');
+    expect(printed()).toContain('Last page: agnt eval list --task-class research_company --page 3');
+  });
+
+  it('refuses a window or a page size the API would clamp, before any request', async () => {
+    for (const bad of [{ days: '366' }, { limit: '101' }]) await expect(evalList(bad)).rejects.toThrow('exit 1');
+    await expect(evalSummary({ days: '366' })).rejects.toThrow('exit 1');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(err.join('\n')).toContain('at most 365');
+    expect(err.join('\n')).toContain('at most 100');
+  });
+
+  it('accepts the largest window and page size', async () => {
+    respond(page([]));
+    await evalList({ days: '365', limit: '100' });
+    expect(requested().searchParams.get('days')).toBe('365');
+    expect(requested().searchParams.get('limit')).toBe('100');
+  });
+
+  it('calls a blank task type "unclassified" in the summary, the list and one review', async () => {
+    respond({ ok: true, summary: { windowDays: 30, count: 3, wouldComplain: 0, byCategory: [], bySentiment: [],
+      byTaskClass: [{ _id: '', count: 2, avgOutcome: 3, avgExperience: 3, avgCredits: 1 }, { _id: null, count: 1, avgOutcome: 3, avgExperience: 3, avgCredits: 1 }] } });
+    await evalSummary({});
+    expect(printed().match(/unclassified/g)!.length).toBeGreaterThanOrEqual(3);
+
+    out.length = 0;
+    respond(page([review({ review: { taskClass: '' } })]));
+    await evalList({});
+    expect(printed()).toContain('ended confused  unclassified');
+
+    out.length = 0;
+    respond({ ok: true, runReview: review({ review: { taskClass: '' } }) });
+    await evalGet(REVIEW_ID, {});
+    expect(printed()).toContain('  unclassified  ');
+  });
+
+  it('stops on a response of the wrong shape rather than crash or print an empty object', async () => {
+    for (const run of [
+      () => evalList({}),
+      () => evalList({ json: true }),
+      () => evalGet(REVIEW_ID, {}),
+      () => evalGet(REVIEW_ID, { json: true }),
+      () => evalSummary({}),
+      () => evalSummary({ json: true }),
+    ]) {
+      err.length = 0;
+      out.length = 0;
+      respond({ ok: true });
+      await expect(run()).rejects.toThrow('exit 1');
+      expect(err.join('\n')).toContain('Unexpected response');
+      expect(out).toEqual([]);
+    }
+  });
+
+  it('leaves out a run duration it cannot compute', async () => {
+    respond({ ok: true, runReview: review({ runCompletedAt: 'not a date', runStartedAt: '2026-09-20T15:00:00.000Z' }) });
+    await evalGet(REVIEW_ID, {});
+    expect(printed()).not.toContain('NaN');
+    expect(printed()).toContain('status completed');
+  });
+
+  it('tells a refused key about scopes as well as users and orgs', async () => {
+    respond({ status: 403, error: 'nope' }, 403);
+    await expect(evalGet(REVIEW_ID, {})).rejects.toThrow('exit 1');
+    expect(err.join('\n')).toContain('unrestricted account-level API key');
+    expect(err.join('\n')).toContain('scopes');
   });
 });
