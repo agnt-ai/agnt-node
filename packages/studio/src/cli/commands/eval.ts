@@ -124,8 +124,13 @@ export function renderList(view: ListView, params: ListRunReviewsParams, nextPag
     const sideEffects = v.undesiredSideEffects?.length ?? 0;
     lines.push('');
     lines.push(
-      `${r._id}  outcome ${score(v.outcomeScore)} ${v.outcomeCategory ?? ''}  experience ${score(v.experienceScore)}  ` +
-        `ended ${v.userSentimentEnd ?? '?'}  ${v.taskClass ?? 'unclassified'}`.replace(/\s+/g, ' '),
+      [
+        r._id,
+        `outcome ${score(v.outcomeScore)}${v.outcomeCategory ? ` ${v.outcomeCategory}` : ''}`,
+        `experience ${score(v.experienceScore)}`,
+        `ended ${v.userSentimentEnd ?? '?'}`,
+        v.taskClass ?? 'unclassified',
+      ].join('  '),
     );
     lines.push(
       `    ${stamp(r.reviewedAt)}  task ${r.task ?? '-'}  chat ${r.chat ?? '-'}  credits ${r.creditsConsumed ?? '?'}` +
