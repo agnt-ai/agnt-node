@@ -15,7 +15,7 @@ vi.mock('../cli/utils/credentials.js', () => ({
   resolveProfile: async () => ({ apiUrl: 'https://api.test/', apiKey: 'ak_live_test' }),
 }));
 
-import { evalGet, evalList, evalSummary, safeJson, shellQuote, stripControl } from '../cli/commands/eval.js';
+import { evalGet, evalList, evalSummary, renderList, safeJson, shellQuote, stripControl } from '../cli/commands/eval.js';
 
 const TASK = '64b0000000000000aaaaaaaa';
 const CHAT = '64b0000000000000bbbbbbbb';
@@ -496,6 +496,13 @@ describe('a response with the right shape but odd contents', () => {
     expect(printed()).toContain('- real one');
     expect(printed()).toContain('Friction: one signal');
     expect(printed()).toContain('Flags: lone flag');
+  });
+
+  it('renderList itself skips an entry that is not an object, whatever the client let through', () => {
+    const view = { runReviews: [null, review(), 'x', 3] as any[], page: 1, perPage: 25, total: 4, totalPages: 1 };
+    const text = renderList(view, {}, null);
+    expect(text).toContain(REVIEW_ID);
+    expect(text.match(new RegExp(REVIEW_ID, 'g'))).toHaveLength(1);
   });
 
   it('prints a summary whose buckets and groups are null or half missing, without NaN or a crash', async () => {
