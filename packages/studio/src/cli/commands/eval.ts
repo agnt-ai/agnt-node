@@ -44,12 +44,21 @@ const UNCLASSIFIED_TASK_CLASS = '__unclassified__';
  * invisibly: control characters (escape sequences that retitle a terminal or
  * clear the screen, carriage returns that overwrite a line), format characters
  * (bidi overrides that reorder text, zero-width characters, the invisible tag
- * block an LLM can read and a person cannot), and the Unicode line and
- * paragraph separators. Newline and tab stay, and so do the zero-width joiner
- * and non-joiner, which emoji sequences and some scripts need.
+ * block an LLM can read and a person cannot), the Unicode line and paragraph
+ * separators, and every other default-ignorable code point (variation
+ * selectors, Hangul and Mongolian fillers and free variation selectors, the
+ * combining grapheme joiner), which render as nothing yet can carry a message
+ * one selector per byte. Only newline and tab stay.
+ *
+ * That is deliberately blunt. The price is that zero-width joiners and variation
+ * selectors go too, so an emoji sequence falls apart into its parts and some
+ * emoji show in their text style, and the left-to-right and right-to-left marks
+ * go, so mixed-direction text can display in a different order. Reviews are the
+ * judge's English summaries of runs, so that is a fair trade for closing the
+ * invisible channels.
  */
-const UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
-const KEPT_IN_TEXT = new Set(['\n', '\t', String.fromCharCode(0x200c), String.fromCharCode(0x200d)]);
+const UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
+const KEPT_IN_TEXT = new Set(['\n', '\t']);
 
 export function stripControl(text: string): string {
   return text.replace(UNSAFE, ch => (KEPT_IN_TEXT.has(ch) ? ch : ''));
