@@ -10,8 +10,10 @@
  *
  * Needs an UNRESTRICTED ACCOUNT-LEVEL API key: created without a specific user,
  * without an org and without scopes. That is the kind that gives `agnt run`
- * account-wide visibility. A key tied to a user or an org, or limited to named
- * scopes, is refused: an evaluation is a cross-user view.
+ * account-wide visibility. A key tied to a user or an org is refused: an
+ * evaluation is a cross-user view. So is a key limited to named scopes, but only
+ * where the API can see them: a direct key call carries them, while the
+ * api.agnt.ai proxy does not forward scopes today and cannot tell.
  *
  * Usage:
  *   agnt eval summary [--days 30] [--profile <name>] [--json]
@@ -249,8 +251,8 @@ function fail(err: any): never {
   if (/\((401|403)\)/.test(message)) {
     console.error(
       'Evaluations need an unrestricted account-level API key: one created without a specific user, ' +
-        'without an org, and without scopes. A key tied to a user or an org, or limited to named scopes ' +
-        '(tasks, chats), is refused. An API that predates evaluations refuses every key.',
+        'without an org, and without scopes. A key tied to a user or an org is refused, and so is one ' +
+        'limited to named scopes where the API can see them. An API that predates evaluations refuses every key.',
     );
   }
   process.exit(1);
