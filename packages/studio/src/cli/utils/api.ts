@@ -219,7 +219,7 @@ export class AgntApiClient {
       {},
       true
     );
-    if (!data?.summary || typeof data.summary !== 'object') {
+    if (!data?.summary || typeof data.summary !== 'object' || typeof data.summary.count !== 'number') {
       throw new Error('Unexpected response from /account/run-reviews/summary: no summary');
     }
     return data.summary;
@@ -256,7 +256,7 @@ export class AgntApiClient {
     const perPage = data.perPage ?? params.limit ?? data.runReviews.length;
     const total = data.total ?? data.runReviews.length;
     return {
-      runReviews: data.runReviews,
+      runReviews: data.runReviews.filter(r => r && typeof r === 'object'),
       page: data.page ?? params.page ?? 1,
       perPage,
       total,

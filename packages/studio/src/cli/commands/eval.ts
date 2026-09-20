@@ -8,12 +8,11 @@
  * `agnt run chat <chatId>` for the conversation, and the LangSmith query for
  * the trace.
  *
- * Needs an UNRESTRICTED ACCOUNT-LEVEL API key: created without a specific user,
- * without an org and without scopes. That is the kind that gives `agnt run`
- * account-wide visibility. A key tied to a user or an org is refused: an
- * evaluation is a cross-user view. So is a key limited to named scopes, but only
- * where the API can see them: a direct key call carries them, while the
- * api.agnt.ai proxy does not forward scopes today and cannot tell.
+ * Needs an ACCOUNT-LEVEL API key: one created without a specific user and
+ * without an org, the kind that gives `agnt run` account-wide visibility. A key
+ * tied to a user or an org is refused: an evaluation is a cross-user view. A
+ * key's scopes are not checked (nothing enforces them on any route, and every
+ * key the console mints carries some).
  *
  * Usage:
  *   agnt eval summary [--days 30] [--profile <name>] [--json]
@@ -41,17 +40,62 @@ const UNCLASSIFIED_TASK_CLASS = '__unclassified__';
 
 /**
  * Judge text is model output shaped by end-user content, and it lands in a
- * terminal and in an agent's context. Drop control characters (escape
- * sequences that retitle a terminal or clear the screen, carriage returns that
- * overwrite a line), keeping newline and tab.
+ * terminal and in an agent's context. Drop what should not be displayed or read
+ * invisibly: control characters (escape sequences that retitle a terminal or
+ * clear the screen, carriage returns that overwrite a line), format characters
+ * (bidi overrides that reorder text, zero-width characters, the invisible tag
+ * block an LLM can read and a person cannot), and the Unicode line and
+ * paragraph separators. Newline and tab stay, and so do the zero-width joiner
+ * and non-joiner, which emoji sequences and some scripts need.
  */
+const UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+const KEPT_IN_TEXT = new Set(['\n', '\t', String.fromCharCode(0x200c), String.fromCharCode(0x200d)]);
+
 export function stripControl(text: string): string {
-  return text.replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g, '');
+  return text.replace(UNSAFE, ch => (KEPT_IN_TEXT.has(ch) ? ch : ''));
 }
 
-/** Quote for a POSIX shell unless plainly safe, so a printed command is the command that was meant when it is pasted. */
+/**
+ * JSON.stringify escapes only below U+0020, so the rest of what stripControl
+ * removes would reach the terminal raw in --json output. Escape it instead: the
+ * JSON stays valid and parses back to the same text. Newline is the pretty
+ * printer's own line break, so it stays.
+ */
+export function safeJson(value: unknown): string {
+  const backslash = String.fromCharCode(92);
+  return JSON.stringify(value, null, 2).replace(UNSAFE, ch =>
+    ch === '\n' ? ch : ch.split('').map(unit => `${backslash}u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`).join(''),
+  );
+}
+
+/**
+ * Quote for a POSIX shell unless plainly safe, so a printed command is the
+ * command that was meant when it is pasted. A leading = is quoted too: zsh, the
+ * macOS default, expands it to a command path.
+ */
 export function shellQuote(value: string): string {
-  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+  return /^(?!=)[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** A number to fixed places, or "?" for anything that is not a finite number. */
+function fixed(n: unknown, places: number): string {
+  return typeof n === 'number' && Number.isFinite(n) ? n.toFixed(places) : '?';
+}
+
+/** A 0 to 1 fraction as a percentage, or "?". */
+function percent(n: unknown): string {
+  return typeof n === 'number' && Number.isFinite(n) ? `${Math.round(n * 100)}%` : '?';
+}
+
+/** The entries of an API field that should be a list: nulls dropped, a lone string kept, anything else nothing. */
+function listOf(x: unknown): unknown[] {
+  if (Array.isArray(x)) return x.filter(i => i != null);
+  return typeof x === 'string' && x ? [x] : [];
+}
+
+/** The object entries of an API list, so one null or stray value does not stop the rest printing. */
+function objectsOf(x: unknown): Record<string, any>[] {
+  return Array.isArray(x) ? x.filter((i): i is Record<string, any> => !!i && typeof i === 'object') : [];
 }
 
 function oneLine(text: unknown, max: number): string {
@@ -80,6 +124,7 @@ function indent(text: unknown): string {
 }
 
 function duration(ms: number): string {
+  if (!Number.isFinite(ms)) return '?';
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -96,31 +141,31 @@ function pctOf(count: number, total: number): string {
   return total ? `${Math.round((count / total) * 100)}%` : '0%';
 }
 
-function bucketLine(buckets: { _id: string | null; count: number }[] = [], total: number): string {
-  return buckets.map(b => `${b._id ?? 'unscored'} ${b.count} (${pctOf(b.count, total)})`).join(', ') || '(none)';
+function bucketLine(buckets: unknown, total: number): string {
+  return objectsOf(buckets).map(b => `${b._id ?? 'unscored'} ${b.count} (${pctOf(Number(b.count), total)})`).join(', ') || '(none)';
 }
 
 export function renderSummary(s: RunReviewSummary): string {
   const lines: string[] = [];
   lines.push(
-    `Run reviews, last ${s.windowDays} days: ${s.count} reviewed, avg outcome ${s.avgOutcome?.toFixed(2) ?? '?'}, ` +
-      `avg experience ${s.avgExperience?.toFixed(2) ?? '?'}, ${s.wouldComplain} would complain`,
+    `Run reviews, last ${s.windowDays ?? '?'} days: ${s.count} reviewed, avg outcome ${fixed(s.avgOutcome, 2)}, ` +
+      `avg experience ${fixed(s.avgExperience, 2)}, ${s.wouldComplain ?? '?'} would complain`,
   );
-  lines.push(`Credits covered ${s.creditsReviewed?.toFixed(0) ?? 0}, judge cost $${s.judgeCostUsd?.toFixed(2) ?? '0.00'}`);
+  lines.push(`Credits covered ${fixed(s.creditsReviewed, 0)}, judge cost $${fixed(s.judgeCostUsd, 2)}`);
   if (!s.count) return lines.join('\n');
 
   lines.push('', `Outcome: ${bucketLine(s.byCategory, s.count)}`);
   lines.push(`Ended:   ${bucketLine(s.bySentiment, s.count)}`);
 
-  const groups: Record<string, any>[] = s.byTaskClass ?? [];
+  const groups = objectsOf(s.byTaskClass);
   if (groups.length) {
     const width = Math.max(...groups.map(g => String(g._id || 'unclassified').length));
     lines.push('', 'By task type:');
     for (const g of groups) {
       lines.push(
         `  ${String(g._id || 'unclassified').padEnd(width)}  ${String(g.count).padStart(4)} runs  ` +
-          `outcome ${g.avgOutcome?.toFixed(2) ?? '?'}  experience ${g.avgExperience?.toFixed(2) ?? '?'}  ` +
-          `credits ${g.avgCredits?.toFixed(1) ?? '?'}`,
+          `outcome ${fixed(g.avgOutcome, 2)}  experience ${fixed(g.avgExperience, 2)}  ` +
+          `credits ${fixed(g.avgCredits, 1)}`,
       );
     }
     lines.push('', 'Open a group with: agnt eval list --task-class <type>   (or --unclassified)');
@@ -138,7 +183,8 @@ export interface ListView {
 
 export function renderList(view: ListView, params: ListRunReviewsParams, pageHint: string | null): string {
   const lines: string[] = [];
-  const { runReviews, page, perPage, total, totalPages } = view;
+  const { page, perPage, total, totalPages } = view;
+  const runReviews = objectsOf(view.runReviews);
   const pastEnd = total > 0 && page > totalPages;
   const first = total ? (page - 1) * perPage + 1 : 0;
   const last = Math.min(page * perPage, total);
@@ -151,7 +197,7 @@ export function renderList(view: ListView, params: ListRunReviewsParams, pageHin
 
   for (const r of runReviews) {
     const v = r.review ?? {};
-    const sideEffects = v.undesiredSideEffects?.length ?? 0;
+    const sideEffects = listOf(v.undesiredSideEffects).length;
     lines.push('');
     lines.push(
       [
@@ -182,7 +228,7 @@ export function renderReview(r: RunReviewRecord): string {
   lines.push(`User: ${personOf(r.user)}${r.originPlatform ? `   Platform: ${r.originPlatform}` : ''}`);
   lines.push(
     `Outcome ${score(v.outcomeScore)}${v.outcomeCategory ? ` (${v.outcomeCategory})` : ''}  ` +
-      `Experience ${score(v.experienceScore)}${v.experienceConfidence != null ? ` (confidence ${Math.round(v.experienceConfidence * 100)}%)` : ''}  ` +
+      `Experience ${score(v.experienceScore)}${v.experienceConfidence != null ? ` (confidence ${percent(v.experienceConfidence)})` : ''}  ` +
       `Ended: ${v.userSentimentEnd ?? '?'}${v.sentimentTrajectory ? ` (${v.sentimentTrajectory})` : ''}  ` +
       `Would complain: ${v.wouldUserComplain == null ? '?' : v.wouldUserComplain ? 'yes' : 'no'}` +
       (v.wouldUserRecommend != null ? `  Recommend: ${v.wouldUserRecommend} (-2 to 2)` : ''),
@@ -195,27 +241,31 @@ export function renderReview(r: RunReviewRecord): string {
   section('What they got', v.whatUserGot);
   section('In their words', v.userPerspective);
 
-  if (v.frictionSignals?.length) lines.push('', `Friction: ${v.frictionSignals.join('; ')}`);
-  if (v.undesiredSideEffects?.length) {
+  const friction = listOf(v.frictionSignals);
+  if (friction.length) lines.push('', `Friction: ${friction.join('; ')}`);
+  const sideEffects = listOf(v.undesiredSideEffects);
+  if (sideEffects.length) {
     lines.push('', 'Undesired side effects:');
-    for (const e of v.undesiredSideEffects) {
+    for (const item of sideEffects) {
+      const e: Record<string, any> = typeof item === 'object' ? (item as Record<string, any>) : { what: String(item) };
       const tags = [e.reachedThirdParty && 'reached a third party', e.reversible === false && 'not reversible'].filter(Boolean);
       lines.push(`  - ${e.what}${tags.length ? ` (${tags.join(', ')})` : ''}`);
     }
   }
   if (v.faultAttribution) {
-    lines.push('', `Fault: ${v.faultAttribution}${v.faultConfidence != null ? ` (confidence ${Math.round(v.faultConfidence * 100)}%)` : ''}` +
+    lines.push('', `Fault: ${v.faultAttribution}${v.faultConfidence != null ? ` (confidence ${percent(v.faultConfidence)})` : ''}` +
       '   [the judge\'s own call, and the field most likely to be wrong]');
     if (v.faultEvidence) lines.push(indent(v.faultEvidence));
   }
   if (v.improvementHypothesis) {
     lines.push('', `What to look at${v.improvementSurface ? ` [${v.improvementSurface}]` : ''}:`, indent(v.improvementHypothesis));
   }
-  if (v.flags?.length) lines.push('', `Flags: ${v.flags.join(', ')}`);
+  const flags = listOf(v.flags);
+  if (flags.length) lines.push('', `Flags: ${flags.join(', ')}`);
 
   lines.push('', 'Original run:');
-  if (r.task) lines.push(`  task  ${r.task}    agnt run task ${r.task}`);
-  if (r.chat) lines.push(`  chat  ${r.chat}    agnt run chat ${r.chat}`);
+  if (r.task) lines.push(`  task  ${r.task}    agnt run task ${shellQuote(String(r.task))}`);
+  if (r.chat) lines.push(`  chat  ${r.chat}    agnt run chat ${shellQuote(String(r.chat))}`);
   lines.push(`  run   ${r.runRef}   (the execution id; the run logs under its first 8 characters)`);
   const facts = [
     r.runStatus && `status ${r.runStatus}`,
@@ -226,8 +276,10 @@ export function renderReview(r: RunReviewRecord): string {
   ].filter(Boolean);
   if (facts.length) lines.push(`  ${facts.join(' · ')}`);
   if (r.task) {
+    // Plain ids keep the double-quoted form the console's hint uses; anything else is quoted for the shell.
+    const metadata = /^[\w-]+$/.test(String(r.task)) ? `"taskId=${r.task}"` : shellQuote(`taskId=${r.task}`);
     lines.push(
-      `  LangSmith: langsmith run list --metadata "taskId=${r.task}" --run-type llm --include-io` +
+      `  LangSmith: langsmith run list --metadata ${metadata} --run-type llm --include-io` +
         '   # the id is an AGNT id, not a LangSmith UUID; `run get` a UUID from the list',
     );
   }
@@ -235,8 +287,8 @@ export function renderReview(r: RunReviewRecord): string {
   const judge = [
     r.judgeModel && `${r.judgeModel}${r.judgeModelTier ? ` (${r.judgeModelTier})` : ''}`,
     r.judgePromptVersion && `prompt ${r.judgePromptVersion}`,
-    r.judgeLatencyMs != null && duration(r.judgeLatencyMs),
-    r.judgeCostUsd != null && `$${Number(r.judgeCostUsd).toFixed(4)}`,
+    r.judgeLatencyMs != null && duration(Number(r.judgeLatencyMs)),
+    r.judgeCostUsd != null && `$${fixed(Number(r.judgeCostUsd), 4)}`,
   ].filter(Boolean);
   if (judge.length) lines.push('', `Judge: ${judge.join(' · ')}`);
 
@@ -246,13 +298,13 @@ export function renderReview(r: RunReviewRecord): string {
 // ── commands ─────────────────────────────────────────────────────────────────
 
 function fail(err: any): never {
-  const message = String(err?.message ?? err);
+  // The message can carry the server's response body: keep it off the terminal raw, like the rest.
+  const message = stripControl(String(err?.message ?? err));
   console.error(message);
   if (/\((401|403)\)/.test(message)) {
     console.error(
-      'Evaluations need an unrestricted account-level API key: one created without a specific user, ' +
-        'without an org, and without scopes. A key tied to a user or an org is refused, and so is one ' +
-        'limited to named scopes where the API can see them. An API that predates evaluations refuses every key.',
+      'Evaluations need an account-level API key: one created without a specific user and without an org. ' +
+        'A key tied to a user or an org is refused. An API that predates evaluations refuses every key.',
     );
   }
   process.exit(1);
@@ -261,7 +313,7 @@ function fail(err: any): never {
 function positiveInt(raw: string | undefined, flag: string, fallback: number, max?: number): number {
   if (raw === undefined) return fallback;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1) throw new Error(`${flag} must be a positive whole number, got "${raw}"`);
+  if (!Number.isSafeInteger(n) || n < 1) throw new Error(`${flag} must be a positive whole number, got "${raw}"`);
   if (max !== undefined && n > max) throw new Error(`${flag} must be at most ${max}, got ${n}`);
   return n;
 }
@@ -284,7 +336,7 @@ export async function evalSummary(opts: EvalSummaryOptions): Promise<void> {
     const days = positiveInt(opts.days, '--days', DEFAULT_DAYS, MAX_DAYS);
     const client = await clientFor(opts.profile);
     const summary = await client.getRunReviewSummary(days);
-    console.log(opts.json ? JSON.stringify({ summary }, null, 2) : stripControl(renderSummary(summary)));
+    console.log(opts.json ? safeJson({ summary }) : stripControl(renderSummary(summary)));
   } catch (err) {
     fail(err);
   }
@@ -347,7 +399,7 @@ export async function evalList(opts: EvalListOptions): Promise<void> {
     const view = await client.listRunReviews(params);
 
     if (opts.json) {
-      console.log(JSON.stringify(view, null, 2));
+      console.log(safeJson(view));
       return;
     }
     let pageHint: string | null = null;
@@ -368,7 +420,7 @@ export async function evalGet(reviewId: string, opts: EvalGetOptions): Promise<v
   try {
     const client = await clientFor(opts.profile);
     const runReview = await client.getRunReview(reviewId);
-    console.log(opts.json ? JSON.stringify({ runReview }, null, 2) : stripControl(renderReview(runReview)));
+    console.log(opts.json ? safeJson({ runReview }) : stripControl(renderReview(runReview)));
   } catch (err) {
     fail(err);
   }

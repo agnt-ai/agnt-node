@@ -15,7 +15,7 @@ vi.mock('../cli/utils/credentials.js', () => ({
   resolveProfile: async () => ({ apiUrl: 'https://api.test/', apiKey: 'ak_live_test' }),
 }));
 
-import { evalGet, evalList, evalSummary, shellQuote, stripControl } from '../cli/commands/eval.js';
+import { evalGet, evalList, evalSummary, safeJson, shellQuote, stripControl } from '../cli/commands/eval.js';
 
 const TASK = '64b0000000000000aaaaaaaa';
 const CHAT = '64b0000000000000bbbbbbbb';
@@ -297,7 +297,14 @@ describe('agnt eval summary', () => {
 const ESC = String.fromCharCode(27);
 const BEL = String.fromCharCode(7);
 const CR = String.fromCharCode(13);
-const CONTROL = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/;
+const ZWNJ = String.fromCharCode(0x200c);
+const ZWJ = String.fromCharCode(0x200d);
+// Everything stripControl removes: control, format (bidi, zero-width, tag block), line and paragraph separators.
+const UNSAFE_CLASS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const unsafeIn = (text: string, keep: string[]) =>
+  [...text].filter(ch => UNSAFE_CLASS.test(ch) && !keep.includes(ch)).map(ch => ch.codePointAt(0)!.toString(16));
+const HUMAN_KEEP = ['\n', '\t', ZWNJ, ZWJ];
+const JSON_KEEP = ['\n'];
 
 describe('printed text is safe to paste and to display', () => {
   it('shellQuote leaves plain values alone and quotes everything else', () => {
@@ -330,26 +337,65 @@ describe('printed text is safe to paste and to display', () => {
 
     respond(page([record]));
     await evalList({});
-    expect(printed()).not.toMatch(CONTROL);
+    expect(unsafeIn(printed(), HUMAN_KEEP)).toEqual([]);
     expect(printed()).toContain('overwritten');
 
     out.length = 0;
     respond({ ok: true, runReview: record });
     await evalGet(REVIEW_ID, {});
-    expect(printed()).not.toMatch(CONTROL);
+    expect(unsafeIn(printed(), HUMAN_KEEP)).toEqual([]);
     expect(printed()).toContain('line two');
 
     out.length = 0;
     respond({ ok: true, summary: { windowDays: 30, count: 1, wouldComplain: 0, byCategory: [{ _id: `x${ESC}[2J`, count: 1 }], bySentiment: [], byTaskClass: [] } });
     await evalSummary({});
-    expect(printed()).not.toMatch(CONTROL);
+    expect(unsafeIn(printed(), HUMAN_KEEP)).toEqual([]);
   });
 
-  it('--json escapes control characters rather than printing them raw', async () => {
-    respond(page([review({ review: { userPerspective: `x${ESC}[2Jy` } })]));
+  it('--json escapes what human output strips, and still parses back to the same text', async () => {
+    const nasty = ['a', ESC, '[2J', String.fromCharCode(0x85), String.fromCharCode(0x2028), String.fromCharCode(0x202e), 'b',
+      String.fromCharCode(0x200b), String.fromCodePoint(0xe0061), 'c\nd\te', String.fromCodePoint(0x1f600)].join('');
+    respond(page([review({ review: { userPerspective: nasty } })]));
     await evalList({ json: true });
-    expect(printed()).not.toMatch(CONTROL);
-    expect(JSON.parse(printed()).runReviews[0].review.userPerspective).toBe(`x${ESC}[2Jy`);
+    expect(unsafeIn(printed(), JSON_KEEP)).toEqual([]);
+    expect(JSON.parse(printed()).runReviews[0].review.userPerspective).toBe(nasty);
+
+    out.length = 0;
+    respond({ ok: true, runReview: review({ review: { whatUserWanted: nasty } }) });
+    await evalGet(REVIEW_ID, { json: true });
+    expect(unsafeIn(printed(), JSON_KEEP)).toEqual([]);
+    expect(JSON.parse(printed()).runReview.review.whatUserWanted).toBe(nasty);
+  });
+
+  it('safeJson is plain JSON.stringify for text that needs no escaping', () => {
+    const value = { a: 'plain text', b: [1, 2, { c: null }], d: 'line\nbreak' };
+    expect(safeJson(value)).toBe(JSON.stringify(value, null, 2));
+  });
+
+  it('stripControl drops bidi overrides, zero-width and tag characters, C1 controls and line separators', () => {
+    const cp = (n: number) => String.fromCodePoint(n);
+    const dropped = [0x202a, 0x202e, 0x2066, 0x2069, 0x200b, 0x200e, 0x2060, 0xfeff, 0x061c, 0xe0001, 0xe0061, 0xe007f, 0x2028, 0x2029, 0x85, 0x9b, 0x7f, 0xfff9, 0xad];
+    for (const c of dropped) expect(stripControl(`a${cp(c)}b`), c.toString(16)).toBe('ab');
+  });
+
+  it('stripControl keeps what text needs: newline, tab, emoji joined with a zero-width joiner, accents, CJK', () => {
+    const family = String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467);
+    for (const text of ['a\nb\tc', family, 'caf' + String.fromCharCode(0xe9), '日本語', 'a' + ZWNJ + 'b']) {
+      expect(stripControl(text)).toBe(text);
+    }
+  });
+
+  it("a server's error body cannot reach the terminal raw either", async () => {
+    respond(`bad ${ESC}]0;pwned${BEL} ${String.fromCharCode(0x202e)}gnp.exe`, 500);
+    await expect(evalGet(REVIEW_ID, {})).rejects.toThrow('exit 1');
+    expect(unsafeIn(err.join('\n'), HUMAN_KEEP)).toEqual([]);
+    expect(err.join('\n')).toContain('500');
+  });
+
+  it('shellQuote quotes a leading = (zsh expands it to a command path) but not an = inside', () => {
+    expect(shellQuote('=ls')).toBe("'=ls'");
+    expect(shellQuote('==')).toBe("'=='");
+    expect(shellQuote('a=b')).toBe('a=b');
   });
 });
 
@@ -420,10 +466,73 @@ describe('the edges of a list and of a review', () => {
     expect(printed()).toContain('status completed');
   });
 
-  it('tells a refused key about scopes as well as users and orgs', async () => {
+  it('tells a refused key what kind it needs, and does not claim scopes matter', async () => {
     respond({ status: 403, error: 'nope' }, 403);
     await expect(evalGet(REVIEW_ID, {})).rejects.toThrow('exit 1');
-    expect(err.join('\n')).toContain('unrestricted account-level API key');
-    expect(err.join('\n')).toContain('limited to named scopes');
+    const text = err.join('\n');
+    expect(text).toContain('account-level API key');
+    expect(text).toContain('a user or an org');
+    expect(text).toContain('predates evaluations');
+    expect(text).not.toContain('scopes');
+  });
+
+  it('refuses a page number that is not a safe integer, before any request', async () => {
+    await expect(evalList({ page: '1e21' })).rejects.toThrow('exit 1');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('a response with the right shape but odd contents', () => {
+  it('prints the rest of a list when one entry is null, and shows odd side effects and signals', async () => {
+    respond({ ok: true, runReviews: [null, review({ review: { undesiredSideEffects: [null, 'a plain string'], frictionSignals: 'one signal', flags: 'lone flag' } }), 'x'], page: 1, perPage: 25, total: 3, totalPages: 1 });
+    await evalList({});
+    expect(printed()).toContain(REVIEW_ID);
+    expect(printed()).toContain('1 undesired side effect');
+
+    out.length = 0;
+    respond({ ok: true, runReview: review({ review: { undesiredSideEffects: [null, 'a plain string', { what: 'real one' }], frictionSignals: 'one signal', flags: 'lone flag' } }) });
+    await evalGet(REVIEW_ID, {});
+    expect(printed()).toContain('- a plain string');
+    expect(printed()).toContain('- real one');
+    expect(printed()).toContain('Friction: one signal');
+    expect(printed()).toContain('Flags: lone flag');
+  });
+
+  it('prints a summary whose buckets and groups are null or half missing, without NaN or a crash', async () => {
+    respond({ ok: true, summary: { count: 4, avgOutcome: '2.4', avgExperience: null, wouldComplain: 1, byCategory: null, bySentiment: [null, { _id: 'neutral', count: 4 }],
+      byTaskClass: [null, { _id: 'research_company', count: 4 }, 'junk'] } });
+    await evalSummary({});
+    const text = printed();
+    expect(text).toContain('neutral 4 (100%)');
+    expect(text).toContain('research_company');
+    expect(text).toContain('last ? days');
+    expect(text).not.toContain('NaN');
+    expect(text).not.toContain('undefined');
+  });
+
+  it('refuses a summary that is not one, rather than print "last undefined days"', async () => {
+    for (const summary of [{}, [], { count: 'many' }]) {
+      err.length = 0;
+      out.length = 0;
+      respond({ ok: true, summary });
+      await expect(evalSummary({})).rejects.toThrow('exit 1');
+      expect(err.join('\n')).toContain('Unexpected response');
+      expect(out).toEqual([]);
+    }
+  });
+
+  it('leaves out a judge latency or cost that is not a number', async () => {
+    respond({ ok: true, runReview: review({ judgeLatencyMs: 'x', judgeCostUsd: 'y', review: { experienceConfidence: 'high', faultConfidence: {} } }) });
+    await evalGet(REVIEW_ID, {});
+    expect(printed()).not.toContain('NaN');
+    expect(printed()).toContain('Judge:');
+  });
+
+  it('quotes the ids in the commands it prints, so a hostile id cannot run anything when pasted', async () => {
+    respond({ ok: true, runReview: review({ task: 'abc; touch X', chat: '$(id)' }) });
+    await evalGet(REVIEW_ID, {});
+    expect(printed()).toContain("agnt run task 'abc; touch X'");
+    expect(printed()).toContain("agnt run chat '$(id)'");
+    expect(printed()).toContain("--metadata 'taskId=abc; touch X'");
   });
 });

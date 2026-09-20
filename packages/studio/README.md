@@ -89,7 +89,7 @@ An account-level API key (one created without a specific `userId`) sees everythi
 
 ### `agnt eval` — read Run Review evaluations
 
-Run Review scores finished runs from the user's point of view (did they get what they asked for, how did it feel) and is what agnt-console's Evaluation page shows. `agnt eval` puts the same three views in the terminal, so an agent can go from "how are runs doing" to one evaluation to the run behind it. Same profile setup as `agnt run`, but it **needs an unrestricted account-level API key** (created without a user, without an org and without scopes): an evaluation is a cross-user view, so a key tied to a user or an org is refused. A key limited to named scopes is refused too where the API can see the scopes (a direct key call); the `api.agnt.ai` proxy does not forward them today, so through it a scoped key is treated as unscoped.
+Run Review scores finished runs from the user's point of view (did they get what they asked for, how did it feel) and is what agnt-console's Evaluation page shows. `agnt eval` puts the same three views in the terminal, so an agent can go from "how are runs doing" to one evaluation to the run behind it. Same profile setup as `agnt run`, but it **needs an account-level API key** (one created without a user and without an org): an evaluation is a cross-user view, so a key tied to a user or an org is refused. A key's scopes are not checked: nothing enforces them on any route, and every key the console mints carries some.
 
 ```bash
 # How runs are doing: averages, outcome and ending buckets, and the by-task-type table
