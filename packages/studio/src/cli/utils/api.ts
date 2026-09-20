@@ -4,6 +4,7 @@
  * Used by:
  *  - AgntExecutor (runtime manifest loading)
  *  - agnt pull CLI command
+ *  - agnt run / agnt eval CLI commands
  */
 
 import type { PromptManifestV2, ModelPricing } from '../../types.js';
@@ -31,6 +32,21 @@ export interface PublicPromptListItem {
 export type TaskSummary = Record<string, any>;
 export type ChatSummary = Record<string, any>;
 export type Activity = Record<string, any>;
+// Run Review records mirror the RunReview document; same reasoning as above.
+export type RunReviewRecord = Record<string, any>;
+export type RunReviewSummary = Record<string, any>;
+
+export interface ListRunReviewsParams {
+  days?: number;
+  page?: number;
+  limit?: number;
+  sort?: 'worst' | 'newest';
+  taskClass?: string;
+  outcomeCategory?: string;
+  sentiment?: string;
+  minScore?: number;
+  maxScore?: number;
+}
 
 export class AgntApiClient {
   private apiUrl: string;
@@ -189,5 +205,67 @@ export class AgntApiClient {
       {},
       true
     );
+  }
+
+  /**
+   * GET /account/run-reviews/summary — the Evaluation dashboard's aggregates
+   * (averages, outcome and sentiment buckets, by task type). Needs an
+   * account-level API key.
+   */
+  async getRunReviewSummary(days?: number): Promise<RunReviewSummary> {
+    const qs = days ? `?days=${days}` : '';
+    const data = await this.request<{ ok: boolean; summary: RunReviewSummary }>(
+      `/account/run-reviews/summary${qs}`,
+      {},
+      true
+    );
+    return data.summary;
+  }
+
+  /**
+   * GET /account/run-reviews — one page of reviews, filtered and sorted
+   * server-side. Each carries the task, chat and execution ids of the run it
+   * scored.
+   */
+  async listRunReviews(params: ListRunReviewsParams = {}): Promise<{
+    runReviews: RunReviewRecord[];
+    page: number;
+    perPage: number;
+    total: number;
+    totalPages: number;
+  }> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const qs = query.toString();
+    const data = await this.request<{
+      ok: boolean;
+      runReviews: RunReviewRecord[];
+      page: number;
+      perPage: number;
+      total: number;
+      totalPages: number;
+    }>(`/account/run-reviews${qs ? `?${qs}` : ''}`, {}, true);
+    return {
+      runReviews: data.runReviews,
+      page: data.page,
+      perPage: data.perPage,
+      total: data.total,
+      totalPages: data.totalPages,
+    };
+  }
+
+  /**
+   * GET /account/run-reviews/:reviewId — one review with everything the judge
+   * produced.
+   */
+  async getRunReview(reviewId: string): Promise<RunReviewRecord> {
+    const data = await this.request<{ ok: boolean; runReview: RunReviewRecord }>(
+      `/account/run-reviews/${encodeURIComponent(reviewId)}`,
+      {},
+      true
+    );
+    return data.runReview;
   }
 }

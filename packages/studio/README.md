@@ -87,6 +87,30 @@ agnt run task <taskId> --json --profile production
 
 An account-level API key (one created without a specific `userId`) sees everything in its account. A user-scoped key only sees that one user's own tasks/chats.
 
+### `agnt eval` — read Run Review evaluations
+
+Run Review scores finished runs from the user's point of view (did they get what they asked for, how did it feel) and is what agnt-console's Evaluation page shows. `agnt eval` puts the same three views in the terminal, so an agent can go from "how are runs doing" to one evaluation to the run behind it. Same profile setup as `agnt run`, but it **needs an account-level API key**: an evaluation is a cross-user view, so a user-scoped or org-scoped key is refused.
+
+```bash
+# How runs are doing: averages, outcome and ending buckets, and the by-task-type table
+agnt eval summary --days 30
+
+# The evaluations, worst first. Filter to a task type from the table above,
+# an outcome, how the user ended, or a score range
+agnt eval list --task-class schedule_meeting_multi_participant
+agnt eval list --max-score 2 --outcome failed --sort newest
+agnt eval list --unclassified
+agnt eval list --page 2
+
+# One evaluation in full
+agnt eval get <reviewId>
+
+# Raw JSON for piping into other tools
+agnt eval list --max-score 2 --json
+```
+
+Every review names the task and chat it is about, in full. `agnt eval get` prints the commands that follow it to the run: `agnt run task <taskId>` for the tool-call timeline, `agnt run chat <chatId>` for the conversation, and the LangSmith query for the trace.
+
 ## Programmatic use
 
 ### `AgntExecutor`
