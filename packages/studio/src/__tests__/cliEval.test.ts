@@ -424,6 +424,6 @@ describe('the edges of a list and of a review', () => {
     respond({ status: 403, error: 'nope' }, 403);
     await expect(evalGet(REVIEW_ID, {})).rejects.toThrow('exit 1');
     expect(err.join('\n')).toContain('unrestricted account-level API key');
-    expect(err.join('\n')).toContain('scopes');
+    expect(err.join('\n')).toContain('limited to named scopes');
   });
 });
