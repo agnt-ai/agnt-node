@@ -8,6 +8,7 @@ import { runInit } from './commands/init.js';
 import { runPull } from './commands/pull.js';
 import { runConfigure } from './commands/configure.js';
 import { runList, runGetTask, runGetChat } from './commands/run.js';
+import { evalSummary, evalList, evalGet } from './commands/eval.js';
 
 const program = new Command();
 
@@ -80,6 +81,48 @@ runCmd
   .option('--all', 'No cap — fetch every activity, however many pages that takes')
   .action(async (chatId: string, opts: { profile?: string; json?: boolean; max?: string; all?: boolean }) => {
     await runGetChat(chatId, opts);
+  });
+
+const evalCmd = program
+  .command('eval')
+  .description('Read Run Review evaluations (how runs went, from the user\'s side) — needs an account-level API key');
+
+evalCmd
+  .command('summary')
+  .description('Averages, outcome and ending buckets, and the by-task-type table')
+  .option('--days <n>', 'Window in days', '30')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable summary')
+  .action(async (opts) => {
+    await evalSummary(opts);
+  });
+
+evalCmd
+  .command('list')
+  .description('List evaluations, worst first, with the task and chat each one is about')
+  .option('--days <n>', 'Window in days', '30')
+  .option('--task-class <class>', 'Only this task type (a row of `agnt eval summary`)')
+  .option('--unclassified', 'Only reviews the judge left without a task type')
+  .option('--outcome <category>', 'catastrophic | failed | partial | success | unclear')
+  .option('--sentiment <ending>', 'pleased | neutral | confused | frustrated | angry | checked_out')
+  .option('--min-score <n>', 'Lowest outcome score to include (1-5)')
+  .option('--max-score <n>', 'Highest outcome score to include (1-5); --max-score 2 is the problem runs')
+  .option('--sort <order>', 'worst (default) or newest')
+  .option('--page <n>', 'Page number', '1')
+  .option('--limit <n>', 'Reviews per page (max 100)', '25')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable list')
+  .action(async (opts) => {
+    await evalList(opts);
+  });
+
+evalCmd
+  .command('get <reviewId>')
+  .description('One evaluation in full, with the commands to open its task, chat and trace')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable report')
+  .action(async (reviewId, opts) => {
+    await evalGet(reviewId, opts);
   });
 
 program.parse(process.argv);

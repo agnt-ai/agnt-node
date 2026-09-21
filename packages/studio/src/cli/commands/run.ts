@@ -100,7 +100,7 @@ function renderActivity(activity: Record<string, any>): void {
   console.log(`[${time}] ${activity.type}`);
 }
 
-async function clientFor(profile?: string): Promise<AgntApiClient> {
+export async function clientFor(profile?: string): Promise<AgntApiClient> {
   const { apiUrl, apiKey } = await resolveProfile(profile);
   return new AgntApiClient({ apiUrl, serviceKey: apiKey });
 }
