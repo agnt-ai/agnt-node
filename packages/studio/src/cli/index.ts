@@ -9,6 +9,10 @@ import { runPull } from './commands/pull.js';
 import { runConfigure } from './commands/configure.js';
 import { runList, runGetTask, runGetChat } from './commands/run.js';
 import { evalSummary, evalList, evalGet } from './commands/eval.js';
+import {
+  runSkillList, runSkillGet, runSkillCreate, runSkillUpdate,
+  runSkillPush, runSkillExport, runSkillPublish,
+} from './commands/skill.js';
 
 const program = new Command();
 
@@ -123,6 +127,102 @@ evalCmd
   .option('--json', 'Print raw JSON instead of a human-readable report')
   .action(async (reviewId, opts) => {
     await evalGet(reviewId, opts);
+  });
+
+const skillCmd = program
+  .command('skill')
+  .description('Create, read, update and publish account skills (including knowledge skills) — needs an API key');
+
+skillCmd
+  .command('list')
+  .description('List skills in the account')
+  .option('--kind <kind>', 'Filter by kind, e.g. knowledge, mcp, cli, agent, workflow')
+  .option('--search <text>', 'Search by name, title or description')
+  .option('--tier <tier>', 'Filter by tier')
+  .option('--category <category>', 'Filter by category')
+  .option('--limit <n>', 'Max results', '50')
+  .option('--page <n>', 'Page number', '1')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable list')
+  .action(async (opts) => {
+    await runSkillList(opts);
+  });
+
+skillCmd
+  .command('get <nameOrId>')
+  .description('Show one skill (by slug or id)')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable summary')
+  .action(async (nameOrId, opts) => {
+    await runSkillGet(nameOrId, opts);
+  });
+
+skillCmd
+  .command('create')
+  .description('Create a skill (flat fields — a single-blob knowledge skill by default)')
+  .requiredOption('--title <title>', 'Human-readable title')
+  .option('--name <slug>', 'Slug (auto-derived from title if omitted)')
+  .option('--kind <kind>', 'knowledge (default), mcp, cli, agent, prompt, workflow, task_template', 'knowledge')
+  .option('--description <text>', 'Short description')
+  .option('--when-to-use <text>', 'Hint for when Prime should reach for this skill')
+  .option('--instructions <text>', 'The skill body Prime reads (plain text)')
+  .option('--instructions-file <path>', 'Read the skill body from a file instead of --instructions')
+  .option('--access <access>', 'private (default) or public')
+  .option('--draft', 'Leave status as draft (invisible to Prime) instead of defaulting to active')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable summary')
+  .action(async (opts) => {
+    await runSkillCreate(opts);
+  });
+
+skillCmd
+  .command('update <nameOrId>')
+  .description('Update a skill\'s fields (only what you pass changes)')
+  .option('--name <slug>', 'New slug')
+  .option('--title <title>', 'New title')
+  .option('--description <text>', 'New description')
+  .option('--when-to-use <text>', 'New "when to use" hint')
+  .option('--instructions <text>', 'New skill body (plain text)')
+  .option('--instructions-file <path>', 'Read the new skill body from a file instead of --instructions')
+  .option('--kind <kind>', 'New kind')
+  .option('--access <access>', 'private or public')
+  .option('--status <status>', 'draft, active, or archived')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable summary')
+  .action(async (nameOrId, opts) => {
+    await runSkillUpdate(nameOrId, opts);
+  });
+
+skillCmd
+  .command('push <file>')
+  .description('Create-or-update a skill from a manifest JSON file (the only way to set multi-file content) — round-trips with `agnt skill export`')
+  .option('--conflict <strategy>', 'skip | overwrite (default) | merge', 'overwrite')
+  .option('--draft', 'Leave status as draft (invisible to Prime) instead of defaulting to active')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable summary')
+  .action(async (file, opts) => {
+    await runSkillPush(file, opts);
+  });
+
+skillCmd
+  .command('export <nameOrId>')
+  .description('Export a skill as a portable manifest JSON (prints to stdout, or use -o to save)')
+  .option('-o, --output <path>', 'Write to a file instead of stdout')
+  .option('--profile <name>', 'Credentials profile to use')
+  .action(async (nameOrId, opts) => {
+    await runSkillExport(nameOrId, opts);
+  });
+
+skillCmd
+  .command('publish <nameOrId>')
+  .description('Publish a skill: snapshot a version and deploy it to an environment')
+  .requiredOption('--environment <slug>', 'Environment slug to publish into (e.g. dev, live)')
+  .option('--deploy', 'Also mark the environment deployment active (not just version-snapshot)')
+  .option('--note <text>', 'Publish note')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable summary')
+  .action(async (nameOrId, opts) => {
+    await runSkillPublish(nameOrId, opts);
   });
 
 program.parse(process.argv);
