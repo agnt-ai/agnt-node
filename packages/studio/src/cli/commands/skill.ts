@@ -37,6 +37,7 @@
  */
 
 import { clientFor } from './run.js';
+import { stripControl, safeJson } from './eval.js';
 import type { AgntApiClient, SkillSummary, SkillManifest } from '../utils/api.js';
 
 export interface SkillProfileOptions {
@@ -49,17 +50,30 @@ function fail(err: any): never {
   process.exit(1);
 }
 
+// Skill title/description/instructions can come from another account (a
+// public store skill, or one 'grant'/'import'-installed rather than
+// authored locally — skillsController.mjs's list()/show() serve those the
+// same as your own). Same reasoning as eval.ts's stripControl on judge
+// text: don't print unsanitized third-party text to a terminal.
 function summaryLine(s: SkillSummary): string {
   const id = s.id ?? s._id ?? '?';
   const status = s.status ?? '?';
   const kind = s.kind ?? '?';
-  return `${id}  [${kind}/${status}]  ${s.name ?? '?'}  ${s.title ?? ''}`.trimEnd();
+  const name = stripControl(s.name ?? '?');
+  const title = stripControl(s.title ?? '');
+  return `${id}  [${kind}/${status}]  ${name}  ${title}`.trimEnd();
 }
 
 // Mirrors skillsController.mjs's `isObjectId`.
 function isObjectIdLike(v: string): boolean {
   return /^[a-f\d]{24}$/i.test(v);
 }
+
+// Server-side `q` substring-matches name OR title OR description
+// (skillsController.mjs list()), sorted by install recency — not an exact
+// name filter. Ask for the API's max page size so an exact-name match isn't
+// missed just because other same-worded skills sort ahead of it.
+const RESOLVE_SEARCH_LIMIT = 200;
 
 /**
  * Resolve a skill by id OR name, always returning the full record fetched
@@ -77,11 +91,30 @@ async function resolveSkill(client: AgntApiClient, idOrName: string): Promise<Sk
   if (isObjectIdLike(idOrName)) {
     return client.getSkill(idOrName);
   }
-  const { skills } = await client.listSkills({ q: idOrName, limit: 50 });
-  const match = skills.find(s => s.name === idOrName);
-  if (!match) throw new Error(`Skill '${idOrName}' not found`);
-  const id = match.id ?? match._id;
+  const { skills } = await client.listSkills({ q: idOrName, limit: RESOLVE_SEARCH_LIMIT });
+  const matches = skills.filter(s => s.name === idOrName);
+  if (!matches.length) throw new Error(`Skill '${idOrName}' not found`);
+  if (matches.length > 1) {
+    // `name` is unique per account (schema index) — this should be
+    // impossible, but resolveSkill exists specifically to defend against a
+    // confirmed server-side lookup bug, so don't silently guess if the
+    // account is ever in a state where it isn't.
+    console.error(`Warning: ${matches.length} skills named '${idOrName}' — using the most recently installed one.`);
+  }
+  const id = matches[0].id ?? matches[0]._id;
   return client.getSkill(id);
+}
+
+// Derives a slug the way the backend requires (validateManifest in
+// importSkillsFromManifest.mjs: /^[a-z0-9][a-z0-9-]*$/) when --name is
+// omitted on create. Without this, `agnt skill create --title "..."` —
+// exactly the form this file's own usage comment and index.ts's --name help
+// text ("auto-derived from title if omitted") advertise — always 400s with
+// "Invalid manifest: name is required", since create() routes through
+// POST /skills/import and nothing else supplies a name.
+function slugify(title: string): string {
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug || 'skill';
 }
 
 // ── list ─────────────────────────────────────────────────────────────────────
@@ -108,7 +141,7 @@ export async function runSkillList(opts: SkillListOptions): Promise<void> {
     });
 
     if (opts.json) {
-      console.log(JSON.stringify({ skills, total }, null, 2));
+      console.log(safeJson({ skills, total }));
       return;
     }
 
@@ -131,16 +164,16 @@ export async function runSkillGet(idOrName: string, opts: SkillProfileOptions): 
     const skill = await resolveSkill(client, idOrName);
 
     if (opts.json) {
-      console.log(JSON.stringify(skill, null, 2));
+      console.log(safeJson(skill));
       return;
     }
 
     console.log(summaryLine(skill));
-    if (skill.description) console.log(`\n${skill.description}`);
-    if (skill.whenToUse) console.log(`\nWhen to use: ${skill.whenToUse}`);
-    if (skill.instructions) console.log(`\n--- instructions ---\n${skill.instructions}`);
+    if (skill.description) console.log(`\n${stripControl(skill.description)}`);
+    if (skill.whenToUse) console.log(`\nWhen to use: ${stripControl(skill.whenToUse)}`);
+    if (skill.instructions) console.log(`\n--- instructions ---\n${stripControl(skill.instructions)}`);
     if (Array.isArray(skill.files) && skill.files.length) {
-      console.log(`\nFiles: ${skill.files.map((f: any) => f.path).join(', ')}`);
+      console.log(`\nFiles: ${skill.files.map((f: any) => stripControl(String(f.path))).join(', ')}`);
     }
   } catch (err: any) {
     fail(err);
@@ -205,11 +238,11 @@ export async function runSkillCreate(opts: SkillWriteOptions): Promise<void> {
   try {
     const instructions = await resolveInstructions(opts);
     const manifest: Record<string, any> = {
+      name: opts.name || slugify(opts.title.trim()),
       title: opts.title.trim(),
       kind: opts.kind ?? 'knowledge',
       status: opts.status ?? (opts.draft ? 'draft' : 'active'),
     };
-    if (opts.name) manifest.name = opts.name;
     if (opts.description) manifest.description = opts.description;
     if (opts.whenToUse) manifest.whenToUse = opts.whenToUse;
     if (instructions) manifest.instructions = instructions;
@@ -224,7 +257,7 @@ export async function runSkillCreate(opts: SkillWriteOptions): Promise<void> {
     }
 
     if (opts.json) {
-      console.log(JSON.stringify(result.skill, null, 2));
+      console.log(safeJson(result.skill));
       return;
     }
     console.log(`Created ${result.skill ? summaryLine(result.skill) : manifest.name}`);
@@ -285,7 +318,7 @@ export async function runSkillUpdate(idOrName: string, opts: SkillWriteOptions):
     }
 
     if (opts.json) {
-      console.log(JSON.stringify(result.skill, null, 2));
+      console.log(safeJson(result.skill));
       return;
     }
     console.log(`${result.action === 'created' ? 'Created' : 'Updated'} ${result.skill ? summaryLine(result.skill) : current.name}`);
@@ -322,6 +355,9 @@ export async function runSkillPush(file: string, opts: SkillPushOptions): Promis
     const { readFile } = await import('fs/promises');
     const raw = await readFile(file, 'utf-8');
     const manifest = unwrapManifest(JSON.parse(raw));
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+      throw new Error(`${file} must contain a JSON object (a manifest), not ${manifest === null ? 'null' : Array.isArray(manifest) ? 'an array' : typeof manifest}`);
+    }
 
     // Same status:'draft'-is-invisible-to-Prime reasoning as create() — stamp
     // metadata.status unless the manifest already declares one or --draft
@@ -341,7 +377,7 @@ export async function runSkillPush(file: string, opts: SkillPushOptions): Promis
     const result = await client.importSkill(manifest, conflictStrategy);
 
     if (opts.json) {
-      console.log(JSON.stringify(result, null, 2));
+      console.log(safeJson(result));
       return;
     }
     if (result.action === 'skipped') {
@@ -365,14 +401,18 @@ export async function runSkillExport(idOrName: string, opts: SkillExportOptions)
   try {
     const client = await clientFor(opts.profile);
     const manifest = await client.exportSkill(idOrName);
-    const json = JSON.stringify(manifest, null, 2);
 
     if (opts.output) {
+      // Written to a file, not a terminal — no injection risk, and this is
+      // meant to round-trip byte-for-byte with `agnt skill push`, so no
+      // sanitization here (unlike the stdout branch below).
       const { writeFile } = await import('fs/promises');
-      await writeFile(opts.output, json, 'utf-8');
+      await writeFile(opts.output, JSON.stringify(manifest, null, 2), 'utf-8');
       console.error(`Exported ${idOrName} → ${opts.output}`);
     } else {
-      console.log(json);
+      // safeJson escapes rather than deletes (unlike stripControl), so this
+      // still round-trips through `agnt skill push` if piped to a file.
+      console.log(safeJson(manifest));
     }
   } catch (err: any) {
     fail(err);
@@ -407,7 +447,7 @@ export async function runSkillPublish(idOrName: string, opts: SkillPublishOption
     });
 
     if (opts.json) {
-      console.log(JSON.stringify(result, null, 2));
+      console.log(safeJson(result));
       return;
     }
     console.log(`Published version ${result.versionNumber} of '${skill.name}' to '${opts.environment}'${opts.deploy ? ' (deployed)' : ''}`);
