@@ -32,6 +32,13 @@ export interface PublicPromptListItem {
 export type TaskSummary = Record<string, any>;
 export type ChatSummary = Record<string, any>;
 export type Activity = Record<string, any>;
+
+// Same "loosely typed on purpose" convention — mirrors Skill.serialize()
+// (functions/agnt-api/controllers/skillsController.mjs), which carries many
+// kind-specific optional fields (mcp/workflow/task_template/...) we don't
+// need to fully model here. `--json` always exposes the raw shape.
+export type SkillSummary = Record<string, any>;
+export type SkillManifest = Record<string, any>;
 // Run Review records mirror the RunReview document; same reasoning as above.
 export type RunReviewRecord = Record<string, any>;
 export type RunReviewSummary = Record<string, any>;
@@ -205,6 +212,124 @@ export class AgntApiClient {
       {},
       true
     );
+  }
+
+  // ── Skills ──────────────────────────────────────────────────────────────
+  // Thin wrappers over the existing, already-wired /skills REST surface
+  // (functions/agnt-api/controllers/skillsController.mjs) — no new backend
+  // endpoints, this just gives the CLI a client for what's already there.
+
+  /**
+   * GET /skills — account skill pool. `origin` defaults server-side to
+   * 'studio' (matches a console/apikey-authored skill's default origin), so
+   * the CLI sees the skills it itself creates without passing anything extra.
+   */
+  async listSkills(params: {
+    kind?: string; q?: string; tier?: string; category?: string; page?: number; limit?: number;
+  } = {}): Promise<{ skills: SkillSummary[]; total?: number; page?: number; totalPages?: number }> {
+    const query = new URLSearchParams();
+    if (params.kind) query.set('kind', params.kind);
+    if (params.q) query.set('q', params.q);
+    if (params.tier) query.set('tier', params.tier);
+    if (params.category) query.set('category', params.category);
+    if (params.page) query.set('page', String(params.page));
+    if (params.limit) query.set('limit', String(params.limit));
+    const qs = query.toString();
+    return this.request<{ ok: boolean; skills: SkillSummary[]; total?: number; page?: number; totalPages?: number }>(
+      `/skills${qs ? `?${qs}` : ''}`,
+      {},
+      true
+    );
+  }
+
+  /**
+   * GET /skills/:idOrName — accepts either a 24-char ObjectId or a skill's
+   * slug (functions/agnt-api/controllers/skillsController.mjs's `skillQuery`
+   * / show() resolve both the same way).
+   */
+  async getSkill(idOrName: string): Promise<SkillSummary> {
+    const data = await this.request<{ ok: boolean; skill: SkillSummary }>(
+      `/skills/${encodeURIComponent(idOrName)}`,
+      {},
+      true
+    );
+    return data.skill;
+  }
+
+  /**
+   * POST /skills — flat single-shot create (CreateSkillBodySchema). Good for
+   * a simple, single-blob `instructions` knowledge skill. For multi-file
+   * skills (spec.files[]), use importSkill() instead — the flat create body
+   * has no `files` field.
+   */
+  async createSkill(body: Record<string, any>): Promise<SkillSummary> {
+    const data = await this.request<{ ok: boolean; skill: SkillSummary }>(
+      '/skills',
+      { method: 'POST', body: JSON.stringify(body) },
+      true
+    );
+    return data.skill;
+  }
+
+  /**
+   * PUT/PATCH /skills/:idOrName — partial update (UpdateSkillBodySchema).
+   * Only send the fields you want changed.
+   */
+  async updateSkill(idOrName: string, body: Record<string, any>): Promise<SkillSummary> {
+    const data = await this.request<{ ok: boolean; skill: SkillSummary }>(
+      `/skills/${encodeURIComponent(idOrName)}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+      true
+    );
+    return data.skill;
+  }
+
+  /**
+   * POST /skills/import — manifest-shaped create-or-update, keyed by
+   * manifest.metadata.name (or a flat manifest.name). This is the only path
+   * that can set multi-file content (spec.files[]) — the flat create/update
+   * bodies above have no `files` field. `conflictStrategy`: 'skip' (default,
+   * fails soft if the skill already exists), 'overwrite' (replace every
+   * field), or 'merge' (update content but keep publishing fields like tier/
+   * listed/access/status as they are on the existing skill).
+   */
+  async importSkill(
+    manifest: SkillManifest,
+    conflictStrategy: 'skip' | 'overwrite' | 'merge' = 'skip'
+  ): Promise<{ action: 'created' | 'updated' | 'skipped'; skill: SkillSummary | null }> {
+    return this.request<{ ok: boolean; action: 'created' | 'updated' | 'skipped'; skill: SkillSummary | null }>(
+      '/skills/import',
+      { method: 'POST', body: JSON.stringify({ manifest, options: { conflictStrategy } }) },
+      true
+    );
+  }
+
+  /**
+   * GET /skills/:idOrName/export — the skill as a portable manifest
+   * (exportSkillToManifest — DB-only fields like _id/account stripped).
+   * Round-trips with importSkill().
+   */
+  async exportSkill(idOrName: string): Promise<SkillManifest> {
+    return this.request<SkillManifest>(`/skills/${encodeURIComponent(idOrName)}/export`, {}, true);
+  }
+
+  /**
+   * POST /skills/:skillId/publish — snapshots a SkillVersion and deploys it
+   * to `environment`. Unlike the other skill endpoints above, this one does
+   * NOT resolve a name — it needs the real ObjectId (publishingController.mjs
+   * looks it up by `_id` only). Callers should resolve via getSkill() first
+   * if they only have a name.
+   */
+  async publishSkill(
+    skillId: string,
+    params: { environment: string; deploy?: boolean; note?: string }
+  ): Promise<{ versionNumber: number; etag: string; skill: SkillSummary }> {
+    const data = await this.request<{ ok: boolean; publish: { versionNumber: number; etag: string; skill: SkillSummary } }>(
+      `/skills/${encodeURIComponent(skillId)}/publish`,
+      { method: 'POST', body: JSON.stringify(params) },
+      true
+    );
+    return data.publish;
   }
 
   /**
