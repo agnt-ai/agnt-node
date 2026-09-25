@@ -178,7 +178,7 @@ skillCmd
 skillCmd
   .command('update <nameOrId>')
   .description('Update a skill\'s fields (only what you pass changes)')
-  .option('--name <slug>', 'New slug')
+  .option('--name <slug>', 'Must equal the current slug — renaming is not supported')
   .option('--title <title>', 'New title')
   .option('--description <text>', 'New description')
   .option('--when-to-use <text>', 'New "when to use" hint')
@@ -207,7 +207,8 @@ skillCmd
 skillCmd
   .command('export <nameOrId>')
   .description('Export a skill as a portable manifest JSON (prints to stdout, or use -o to save)')
-  .option('-o, --output <path>', 'Write to a file instead of stdout')
+  .option('-o, --output <path>', 'Write to a file instead of stdout (refuses to overwrite an existing file)')
+  .option('--force', 'With -o, overwrite an existing file')
   .option('--profile <name>', 'Credentials profile to use')
   .action(async (nameOrId, opts) => {
     await runSkillExport(nameOrId, opts);

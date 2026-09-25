@@ -31,7 +31,7 @@
  *                      [--profile <name>] [--json]
  *   agnt skill push <manifest.json> [--conflict skip|overwrite|merge] [--draft]
  *                      [--profile <name>] [--json]
- *   agnt skill export <nameOrId> [-o <file>] [--profile <name>]
+ *   agnt skill export <nameOrId> [-o <file> [--force]] [--profile <name>]
  *   agnt skill publish <nameOrId> --environment <env> [--deploy] [--note <text>]
  *                      [--profile <name>] [--json]
  */
@@ -46,7 +46,7 @@ export interface SkillProfileOptions {
 }
 
 function fail(err: any): never {
-  console.error(err?.message ?? String(err));
+  console.error(stripControl(err?.message ?? String(err)));
   process.exit(1);
 }
 
@@ -128,16 +128,25 @@ export interface SkillListOptions extends SkillProfileOptions {
   page?: string;
 }
 
+function positiveInt(flag: string, v: string | undefined): number | undefined {
+  if (v === undefined || v === '') return undefined;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${flag} must be a positive integer (got "${v}")`);
+  return n;
+}
+
 export async function runSkillList(opts: SkillListOptions): Promise<void> {
   try {
+    const limit = positiveInt('--limit', opts.limit);
+    const page = positiveInt('--page', opts.page);
     const client = await clientFor(opts.profile);
     const { skills, total } = await client.listSkills({
       kind: opts.kind,
       q: opts.search,
       tier: opts.tier,
       category: opts.category,
-      limit: opts.limit ? Number(opts.limit) : undefined,
-      page: opts.page ? Number(opts.page) : undefined,
+      limit,
+      page,
     });
 
     if (opts.json) {
@@ -294,21 +303,40 @@ export async function runSkillUpdate(idOrName: string, opts: SkillWriteOptions):
     const current = await resolveSkill(client, idOrName);
     if (!current?.name) throw new Error(`Could not resolve '${idOrName}'`);
 
+    // The import path is keyed by {account, name}, and `fields.name` would
+    // override the lookup key — so `--name <new>` would not rename, it would
+    // create a second skill under the new name and leave this one untouched.
+    // The API has no rename path reachable with an API key (PATCH /skills/:id
+    // 403s for non-console callers, see above), so refuse rather than
+    // silently create a copy. Passing the current name is a harmless no-op.
+    if (fields.name !== undefined) {
+      if (fields.name !== current.name) {
+        throw new Error(`Renaming isn't supported by 'agnt skill update' (--name would create a new skill '${fields.name}' rather than rename '${current.name}'). Use 'agnt skill create' for a new skill.`);
+      }
+      delete fields.name;
+    }
+    if (Object.keys(fields).length === 0) {
+      console.error('Nothing to update — --name matches the current name and no other field was passed');
+      process.exit(1);
+    }
+
+    // POST /skills/import with 'overwrite' rewrites SkillVersion v1's stored
+    // manifest with exactly what we send (importSkillsFromManifest.mjs
+    // upsertSkillVersion), and the dev/live Deployments seeded at create time
+    // serve v1's manifest verbatim (manifestController.mjs). So send the FULL
+    // current manifest with the changes applied, not just the changed fields —
+    // otherwise a one-field update leaves the deployed manifest partial.
+    const base = await client.exportSkill(current.id ?? current._id ?? idOrName);
+    const manifest = { ...base, ...fields, name: current.name, kind: fields.kind ?? base.kind ?? current.kind };
+
     // 'overwrite', not 'merge': importSkillsFromManifest.mjs's 'merge' mode
     // explicitly SKIPS every key in PUBLISHING_FIELDS (status, access, tier,
-    // listed, hidden, ...) to protect a full manifest re-import from
-    // clobbering admin-managed fields it didn't intend to touch — but that
-    // means a merge silently no-ops `--status`/`--access` (confirmed live:
-    // `--status active` reported "Updated" while the skill stayed 'draft').
-    // 'overwrite' only applies keys actually present in `fields` (nothing
-    // else is in this manifest at all), so for a command that already only
-    // ever sends what the caller explicitly asked to change, 'overwrite' is
-    // the one that behaves like "update" — it carries none of overwrite's
-    // usual "replaces everything" risk here.
-    const result = await client.importSkill(
-      { name: current.name, kind: fields.kind ?? current.kind, ...fields },
-      'overwrite'
-    );
+    // listed, hidden, ...) — but that means a merge silently no-ops
+    // `--status`/`--access` (confirmed live: `--status active` reported
+    // "Updated" while the skill stayed 'draft'). The manifest above is the
+    // skill's own exported state plus the requested changes, so overwriting
+    // with it only changes what the caller asked to change.
+    const result = await client.importSkill(manifest, 'overwrite');
     if (result.action === 'created') {
       // 'merge' still creates when the name doesn't exist yet (importSkillsFromManifest
       // has no separate "must already exist" mode) — shouldn't happen since we
@@ -395,6 +423,7 @@ export async function runSkillPush(file: string, opts: SkillPushOptions): Promis
 export interface SkillExportOptions {
   profile?: string;
   output?: string;
+  force?: boolean;
 }
 
 export async function runSkillExport(idOrName: string, opts: SkillExportOptions): Promise<void> {
@@ -406,8 +435,14 @@ export async function runSkillExport(idOrName: string, opts: SkillExportOptions)
       // Written to a file, not a terminal — no injection risk, and this is
       // meant to round-trip byte-for-byte with `agnt skill push`, so no
       // sanitization here (unlike the stdout branch below).
+      // 'wx' refuses to clobber an existing file unless --force.
       const { writeFile } = await import('fs/promises');
-      await writeFile(opts.output, JSON.stringify(manifest, null, 2), 'utf-8');
+      try {
+        await writeFile(opts.output, JSON.stringify(manifest, null, 2), { encoding: 'utf-8', flag: opts.force ? 'w' : 'wx' });
+      } catch (e: any) {
+        if (e?.code === 'EEXIST') throw new Error(`${opts.output} already exists — pass --force to overwrite it`);
+        throw e;
+      }
       console.error(`Exported ${idOrName} → ${opts.output}`);
     } else {
       // safeJson escapes rather than deletes (unlike stripControl), so this
