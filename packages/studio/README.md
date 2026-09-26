@@ -161,6 +161,29 @@ const executor = await createExecutor({
 const result = await executor.execute();
 ```
 
+## Failure results
+
+A failed `execute()` returns `{ ok: false, error, failure }`. `error` is the message string (unchanged);
+`failure` is structured, derived from the provider's typed error (HTTP status, error class, machine code) and
+never from message text, so it is language-independent:
+
+```ts
+if (!result.ok) {
+  const { kind, status, provider, model, fallbackTrail } = result.failure!;
+  // kind: 'quota' | 'timeout' | 'aborted' | 'unsupported' | 'provider_error' | 'bad_request' | 'unknown'
+  // fallbackTrail: [{ provider, model, kind, status }] — every model-chain member tried, in order
+}
+```
+
+- `quota`: HTTP 429, or a quota/rate-limit class/code (OpenAI/Azure Foundry `rate_limit_exceeded`, `insufficient_quota`,
+  `RateLimitReached`; Anthropic `rate_limit_error`; Kimi `exceeded_current_quota_error`; Google `RESOURCE_EXHAUSTED`).
+- `timeout`: idle/backstop stream abort, HTTP 408, timeout error class or code. `aborted`: the caller stopped the run.
+- `unsupported`: HTTP 501/405/415 or an `unsupported_*`/`DeploymentNotFound` style code. `provider_error`: 5xx, overloaded, network.
+- `bad_request`: any other 4xx. `unknown`: no typed signal.
+
+Because a 429 is retried by the provider client, `streamWithRetry`, and then the next chain member, a 429 storm
+often ends as a `timeout` whose `fallbackTrail` shows only `quota` entries. Inspect the trail, not just `kind`.
+
 ## Logging
 
 Pass `logLevel` to control output verbosity:

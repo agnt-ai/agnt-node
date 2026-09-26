@@ -191,6 +191,29 @@ describe('execute() failure result', () => {
     expect(r.failure.kind).toBe('aborted');
   });
 
+  it('non-eligible abort on a later member keeps the earlier members in the trail', async () => {
+    const ex = new TestExecutor(cfg(manifest([
+      { provider: 'anthropic', model: 'a' }, { provider: 'anthropic', model: 'b' },
+    ]))) as any;
+    ex.invoke
+      .mockRejectedValueOnce(openaiErr(429, null))
+      .mockRejectedValueOnce(new StreamAbortError('backstop', 'x'));
+    const r = await ex.execute();
+    expect(r.failure.kind).toBe('timeout');
+    expect(r.failure.fallbackTrail).toEqual([
+      { provider: 'anthropic', model: 'a', kind: 'quota', status: 429 },
+      { provider: 'anthropic', model: 'b', kind: 'timeout', status: undefined },
+    ]);
+  });
+
+  it('a 429-shaped error thrown after the caller stopped is aborted (in failure and in the trail)', async () => {
+    const ex = new TestExecutor(cfg(manifest([{ provider: 'anthropic', model: 'a' }]))) as any;
+    ex.invoke.mockImplementation(async () => { ex.cancel(); throw openaiErr(429, null); });
+    const r = await ex.execute();
+    expect(r.failure.kind).toBe('aborted');
+    expect(r.failure.fallbackTrail[0].kind).toBe('aborted');
+  });
+
   it('error thrown outside model invocation still yields a failure (unknown, primary provider/model)', async () => {
     const m = manifest([{ provider: 'anthropic', model: 'a' }]);
     m.spec.variables = [{ key: 'need', required: true } as any];
