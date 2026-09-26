@@ -12,7 +12,7 @@ import BaseExecutor from '../BaseExecutor.js';
 import AnthropicExecutor from '../providers/anthropic.js';
 import AzureFoundryExecutor from '../providers/azureFoundry.js';
 import OpenAICompatibleExecutor from '../providers/openaiCompatible.js';
-import { classifyError } from '../failure.js';
+import { classifyError, buildFailure } from '../failure.js';
 import { StreamAbortError } from '../providers/streaming.js';
 import type { BaseExecutorConfig, PromptManifestV2 } from '../types.js';
 
@@ -82,7 +82,7 @@ describe('classifyError — kind per provider shape', () => {
     ['anthropic APIConnectionError', new Anthropic.APIConnectionError({ message: 'x' }), 'provider_error', undefined],
     // bad_request
     ['anthropic 400 invalid_request_error', anthropicErr(400, 'invalid_request_error'), 'bad_request', 400],
-    ['openai 401', openaiErr(401, 'invalid_api_key'), 'bad_request', 401],
+    ['openai 401 (auth)', openaiErr(401, 'invalid_api_key'), 'auth', 401],
     ['openai 422', openaiErr(422, null), 'bad_request', 422],
     // unknown
     ['plain Error', new Error('rate limit exceeded, quota, timeout'), 'unknown', undefined],
@@ -90,7 +90,8 @@ describe('classifyError — kind per provider shape', () => {
     ['undefined', undefined, 'unknown', undefined],
   ];
   it.each(cases)('%s -> %s', (_n, err, kind, status) => {
-    expect(classifyError(err)).toEqual({ kind, status });
+    const c = classifyError(err);
+    expect({ kind: c.kind, status: c.status }).toEqual({ kind, status });
   });
 
   it('never keys on message text (quota/timeout wording in a plain Error stays unknown)', () => {
@@ -112,7 +113,7 @@ describe('execute() failure result', () => {
     expect(r.ok).toBe(false);
     expect(r.error).toBe('429 この文言は無関係'); // SDK-formatted message, unchanged
     expect(r.failure).toEqual({
-      kind: 'quota', status: 429, provider: 'openai', model: 'gpt-x',
+      kind: 'quota', status: 429, provider: 'openai', model: 'gpt-x', retryable: true,
       fallbackTrail: [{ provider: 'openai', model: 'gpt-x', kind: 'quota', status: 429 }],
     });
   });
@@ -221,6 +222,165 @@ describe('execute() failure result', () => {
     const r = await ex.execute();
     expect(r.ok).toBe(false);
     expect(r.failure).toEqual({ kind: 'unknown', status: undefined, provider: 'anthropic', model: 'a', fallbackTrail: [] });
+  });
+});
+
+describe('classifyError — names, cause chain, ordering', () => {
+  const k = (e: any, o?: any) => classifyError(e, o).kind;
+
+  it('reads `.name` too: DOMException-style and smithy plain Errors, and minified class names', () => {
+    expect(k(Object.assign(new Error('x'), { name: 'AbortError' }))).toBe('aborted');
+    expect(k(Object.assign(new Error('x'), { name: 'TimeoutError' }))).toBe('timeout');
+    expect(k(Object.assign(new Error('x'), { name: 'ThrottlingException' }))).toBe('quota');
+    class e extends Error {}
+    expect(k(Object.assign(new e('x'), { name: 'RateLimitError' }))).toBe('quota');
+  });
+
+  it('reads Node codes through the cause chain (Node fetch failed TypeError)', () => {
+    const fetchFailed = (code: string) => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('c'), { code }) });
+    expect(k(fetchFailed('ETIMEDOUT'))).toBe('timeout');
+    expect(k(fetchFailed('UND_ERR_CONNECT_TIMEOUT'))).toBe('timeout');
+    expect(k(fetchFailed('ECONNRESET'))).toBe('provider_error');
+    expect(k(fetchFailed('ENOTFOUND'))).toBe('provider_error');
+    expect(k(fetchFailed('UND_ERR_SOCKET'))).toBe('provider_error');
+    // TLS/certificate failures are deliberately left unknown
+    expect(k(fetchFailed('CERT_HAS_EXPIRED'))).toBe('unknown');
+    expect(k(fetchFailed('ERR_TLS_CERT_ALTNAME_INVALID'))).toBe('unknown');
+  });
+
+  it('a StreamAbortError in the cause chain is honoured', () => {
+    expect(k(Object.assign(new Error('wrapper'), { cause: new StreamAbortError('external', 'x') }))).toBe('aborted');
+    expect(k(Object.assign(new Error('wrapper'), { cause: new StreamAbortError('idle', 'x') }))).toBe('timeout');
+  });
+
+  it('quota is checked before timeout: a 408 / timeout-class error carrying a quota signal is quota', () => {
+    expect(k(Object.assign(new Error('x'), { status: 408, code: 'rate_limit_exceeded' }))).toBe('quota');
+    expect(k(Object.assign(new Error('x'), { name: 'TimeoutError', status: 429 }))).toBe('quota');
+    expect(k(Object.assign(new Error('x'), { code: 'ETIMEDOUT', status: 429 }))).toBe('quota');
+  });
+
+  it('auth: 401/403, auth classes and AccessDenied codes (not bad_request)', () => {
+    expect(k(openaiErr(401, 'invalid_api_key'))).toBe('auth');
+    expect(k(anthropicErr(403, 'permission_error'))).toBe('auth');
+    expect(k(new Anthropic.AuthenticationError(401, undefined, 'x', new Headers()))).toBe('auth');
+    expect(k(new OpenAI.PermissionDeniedError(403, undefined, 'x', new Headers()))).toBe('auth');
+    expect(k(named('AccessDeniedException', { $metadata: { httpStatusCode: 400 } }))).toBe('auth');
+    expect(k({ code: 'AccessDenied' })).toBe('auth');
+    // quota still wins over auth statuses
+    expect(k(openaiErr(403, 'insufficient_quota'))).toBe('quota');
+  });
+
+  it('402: no code = bad_request; with a quota code = quota', () => {
+    expect(k(Object.assign(new Error('x'), { status: 402 }))).toBe('bad_request');
+    expect(k(Object.assign(new Error('x'), { status: 402, error: { type: 'exceeded_current_quota_error' } }))).toBe('quota');
+  });
+
+  it('a 400 with no code (e.g. Azure "no deployments ready") is bad_request: SDK never reads message text', () => {
+    expect(k(Object.assign(new Error('No deployments ready'), { status: 400 }))).toBe('bad_request');
+  });
+
+  it('retryable hint: transient vs permanent', () => {
+    const r = (e: any) => classifyError(e).retryable;
+    expect(r(openaiErr(429, 'rate_limit_exceeded'))).toBe(true);
+    expect(r(openaiErr(429, 'insufficient_quota'))).toBe(false);
+    expect(r(Object.assign(new Error('x'), { status: 429, error: { type: 'exceeded_current_quota_error' } }))).toBe(false);
+    expect(r(anthropicErr(529, 'overloaded_error'))).toBe(true);
+    expect(r(new StreamAbortError('idle', 'x'))).toBe(true);
+    expect(r(openaiErr(401, 'invalid_api_key'))).toBe(false);
+    expect(r(anthropicErr(400, 'invalid_request_error'))).toBe(false);
+    expect(r(openaiErr(501, null))).toBe(false);
+    expect(r(new StreamAbortError('external', 'x'))).toBe(false);
+    expect(r(new Error('x'))).toBeUndefined();
+  });
+});
+
+describe('tool errors are not LLM errors', () => {
+  class LoopExecutor extends BaseExecutor {
+    hasToolCalls(m: any) { return !!m?.tool_calls?.length; }
+    invoke = vi.fn().mockResolvedValue({
+      message: { role: 'assistant', content: '', tool_calls: [{ id: 't1', name: 'flaky', args: {} }] },
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+  }
+  const mk = (status: number) => {
+    const m = manifest([{ provider: 'anthropic', model: 'a' }]);
+    m.spec.enableToolCalls = true;
+    m.spec.tools = [{ name: 'flaky', description: 'd', parameters: { type: 'object', properties: {} } } as any];
+    const handler = { execute: vi.fn().mockRejectedValue(Object.assign(new Error('upstream'), { status })) };
+    const ex = new LoopExecutor({ ...cfg(m), toolRouter: { flaky: handler } } as any) as any;
+    return { ex, handler };
+  };
+
+  it.each([429, 408, 503])('a tool handler error with .status %i rethrown after 3 strikes is unknown, not quota/timeout/provider_error', async (status) => {
+    const { ex, handler } = mk(status);
+    const r = await ex.execute();
+    expect(handler.execute.mock.calls.length).toBeGreaterThanOrEqual(3); // really went through the tool loop
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe('upstream');
+    expect(r.failure.kind).toBe('unknown');
+    expect(r.failure.status).toBeUndefined();
+    expect(r.failure.fallbackTrail).toEqual([]);
+    expect(r.failure.retryable).toBeUndefined();
+  });
+
+  it('cancelled + no trail = aborted; a cancel that does not throw has no failure', async () => {
+    expect(buildFailure(Object.assign(new Error('x'), { status: 429 }), {}, { cancelled: true }))
+      .toMatchObject({ kind: 'aborted', retryable: false });
+    const ex = new TestExecutor(cfg(manifest([{ provider: 'anthropic', model: 'a' }]))) as any;
+    ex.invoke.mockImplementation(async () => { ex.cancel(); return OK; });
+    const r = await ex.execute();
+    expect(r.ok).toBe(false);
+    expect(r.failure).toBeUndefined();
+  });
+});
+
+describe('success keeps the trail', () => {
+  const two = () => new TestExecutor(cfg(manifest([
+    { provider: 'anthropic', model: 'a' }, { provider: 'anthropic', model: 'b' },
+  ]))) as any;
+
+  it('quota then success: ok:true with the failed member in fallbackTrail', async () => {
+    const ex = two();
+    ex.invoke.mockRejectedValueOnce(openaiErr(429, 'RateLimitReached')).mockResolvedValueOnce(OK);
+    const r = await ex.execute();
+    expect(r.ok).toBe(true);
+    expect(r.failure).toBeUndefined();
+    expect(r.fallbackTrail).toEqual([{ provider: 'anthropic', model: 'a', kind: 'quota', status: 429 }]);
+  });
+
+  it('first member succeeds: no fallbackTrail key at all', async () => {
+    const ex = two();
+    ex.invoke.mockResolvedValueOnce(OK);
+    const r = await ex.execute();
+    expect(r.ok).toBe(true);
+    expect('fallbackTrail' in r).toBe(false);
+  });
+
+  it('cross-provider success also carries the trail', async () => {
+    const ex = new TestExecutor({
+      ...cfg(manifest([{ provider: 'azureFoundry', model: 'a' }, { provider: 'kimi', model: 'b' }])),
+      executorFactory: async () => ({ invoke: async () => OK }),
+    } as any) as any;
+    ex.invoke.mockRejectedValueOnce(openaiErr(429, null));
+    const r = await ex.execute();
+    expect(r.ok).toBe(true);
+    expect(r.fallbackTrail).toEqual([{ provider: 'azureFoundry', model: 'a', kind: 'quota', status: 429 }]);
+  });
+
+  it('a member skipped for lack of an executorFactory is recorded as unsupported; failure names the member actually tried', async () => {
+    const ex = new TestExecutor(cfg(manifest([
+      { provider: 'anthropic', model: 'a' }, { provider: 'openai', model: 'b' },
+    ]))) as any; // no executorFactory: cross-provider hop skipped
+    ex.invoke.mockRejectedValueOnce(openaiErr(429, null));
+    const r = await ex.execute();
+    expect(r.ok).toBe(false);
+    expect(r.failure.kind).toBe('quota');
+    expect(r.failure.provider).toBe('anthropic');
+    expect(r.failure.model).toBe('a');
+    expect(r.failure.fallbackTrail).toEqual([
+      { provider: 'anthropic', model: 'a', kind: 'quota', status: 429 },
+      { provider: 'openai', model: 'b', kind: 'unsupported' },
+    ]);
   });
 });
 

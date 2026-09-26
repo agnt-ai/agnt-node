@@ -12,6 +12,27 @@
  * the provider's machine-readable error codes/types. NEVER from message text:
  * messages are localized/free-form and a word list is both brittle and
  * language-specific. Unknown shapes classify as `unknown`, not a guess.
+ *
+ * DELIBERATE DECISIONS (also in README):
+ *  - `kind` is NOT a retry instruction. Read `retryable` for that: 529/5xx and a
+ *    transient 429 are retryable; `insufficient_quota` / `exceeded_current_quota_error`
+ *    are `quota` but retryable:false (permanent until billing changes); 401/403 (`auth`)
+ *    and other 4xx are not retryable. `retryable` is undefined for `unknown`.
+ *  - 401/403 (and AuthenticationError/PermissionDeniedError/AccessDenied codes) are
+ *    `auth`, not `bad_request`: a revoked key is an operator problem.
+ *  - 402 with no quota code is `bad_request`; 402 carrying a quota code is `quota`.
+ *  - The SDK deliberately does NOT match message text, so a transient failure that a
+ *    provider reports only in prose (e.g. Azure "no deployments ready": HTTP 400, no
+ *    code) is `bad_request`. A consumer that must catch such cases has to do its own
+ *    text match; it will not be found here.
+ *  - Node fetch failures: the top-level TypeError('fetch failed') carries the Node code
+ *    on `.cause`; codes are read through the cause chain. UND_ERR_SOCKET and the
+ *    ECONNRESET/ECONNREFUSED/ENOTFOUND/EAI_AGAIN family are `provider_error`; TLS/certificate errors
+ *    (ERR_TLS_*, CERT_*, UNABLE_TO_*) are left `unknown`.
+ *  - Only errors that came through invokeWithFallback (they carry `failureTrail`) are
+ *    classified by type. Anything else (a tool handler's rethrown error, a variable
+ *    validation error) is `unknown` (`aborted` if the caller cancelled), because a
+ *    tool error's `.status` says nothing about the LLM provider.
  */
 
 import { StreamAbortError } from './providers/streaming.js';
@@ -34,6 +55,16 @@ const QUOTA_CODES = new Set([
   'resourceexhausted', 'throttlingexception', 'throttled', 'requestlimitexceeded', 'tokenratelimit',
 ]);
 
+/** Quota codes that are permanent until billing/plan changes — quota, but NOT retryable. */
+const PERMANENT_QUOTA_CODES = new Set(['insufficientquota', 'exceededcurrentquotaerror']);
+
+/** Error classes / codes for authn/authz failures (revoked or wrong key). */
+const AUTH_CLASSES = new Set(['AccessDeniedException', 'AuthenticationError', 'PermissionDeniedError', 'UnauthorizedError']);
+const AUTH_CODES = new Set([
+  'invalidapikey', 'authenticationerror', 'permissionerror', 'accessdenied', 'accessdeniedexception',
+  'unauthorizedexception', 'unauthorized', 'permissiondenied', 'invalidauthentication', 'incorrectapikey',
+]);
+
 /** Error class names (constructor.name / .name) that mean quota. */
 const QUOTA_CLASSES = new Set(['RateLimitError', 'ThrottlingException', 'TooManyRequestsError']);
 
@@ -47,15 +78,52 @@ const UNSUPPORTED_CODES = new Set([
 const TIMEOUT_CODES = new Set([
   'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
 ]);
-const NETWORK_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ECONNABORTED']);
+const NETWORK_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'ECONNABORTED', 'UND_ERR_SOCKET']);
 
 const TIMEOUT_CLASSES = new Set(['APIConnectionTimeoutError', 'TimeoutError', 'RequestTimeoutError']);
 const ABORT_CLASSES = new Set(['AbortError', 'APIUserAbortError', 'GoogleGenerativeAIAbortError']);
 const NETWORK_CLASSES = new Set(['APIConnectionError', 'FetchError']);
 const SERVER_CLASSES = new Set(['InternalServerError', 'OverloadedError', 'ServiceUnavailableException']);
 
-function className(e: any): string {
-  return e?.constructor?.name ?? e?.name ?? '';
+/** Every class-ish name an error goes by: constructor.name (minified in some
+ *  bundles) AND `.name` (set by DOMException, AWS/smithy, and SDKs that pin it). */
+function classNames(e: any): Set<string> {
+  const out = new Set<string>();
+  const seen = new Set<any>();
+  let cur = e;
+  for (let d = 0; cur && typeof cur === 'object' && d < 4 && !seen.has(cur); d++) {
+    seen.add(cur);
+    if (typeof cur.constructor?.name === 'string') out.add(cur.constructor.name);
+    if (typeof cur.name === 'string') out.add(cur.name);
+    cur = cur.cause;
+  }
+  return out;
+}
+
+/** Node error codes (raw, e.g. ETIMEDOUT) from the error and its cause chain —
+ *  Node's `fetch failed` TypeError carries the code on `.cause`. */
+function nodeCodes(e: any): string[] {
+  const out: string[] = [];
+  const seen = new Set<any>();
+  let cur = e;
+  for (let d = 0; cur && typeof cur === 'object' && d < 4 && !seen.has(cur); d++) {
+    seen.add(cur);
+    if (typeof cur.code === 'string') out.push(cur.code);
+    cur = cur.cause;
+  }
+  return out;
+}
+
+/** A StreamAbortError anywhere in the cause chain (or the error itself). */
+function findStreamAbort(e: any): StreamAbortError | undefined {
+  const seen = new Set<any>();
+  let cur = e;
+  for (let d = 0; cur && typeof cur === 'object' && d < 4 && !seen.has(cur); d++) {
+    if (cur instanceof StreamAbortError) return cur;
+    seen.add(cur);
+    cur = cur.cause;
+  }
+  return undefined;
 }
 
 /** Numeric HTTP status from the error itself or a provider wrapper (`response`,
@@ -97,34 +165,55 @@ function extractCodes(err: any): string[] {
  * Classify one thrown provider/executor error into a failure kind + status.
  * `cancelled` is the executor's own record that the caller asked to stop.
  */
-export function classifyError(err: any, opts: { cancelled?: boolean } = {}): { kind: ExecutorFailureKind; status?: number } {
+export function classifyError(
+  err: any,
+  opts: { cancelled?: boolean } = {}
+): { kind: ExecutorFailureKind; status?: number; retryable?: boolean } {
   const status = extractStatus(err);
 
-  if (opts.cancelled) return { kind: 'aborted', status };
+  if (opts.cancelled) return { kind: 'aborted', status, retryable: false };
 
-  // Typed stream abort minted by streamWithRetry from the guard's own reason.
-  if (err instanceof StreamAbortError) {
-    return { kind: err.reason === 'external' ? 'aborted' : 'timeout', status };
+  // Typed stream abort minted by streamWithRetry from the guard's own reason
+  // (also when it is wrapped as a cause by an outer layer).
+  const sa = findStreamAbort(err);
+  if (sa) {
+    return sa.reason === 'external'
+      ? { kind: 'aborted', status, retryable: false }
+      : { kind: 'timeout', status, retryable: true };
   }
 
-  const name = className(err);
+  const names = classNames(err);
+  const anyName = (set: Set<string>) => [...names].some(n => set.has(n));
   const codes = extractCodes(err);
   const has = (set: Set<string>) => codes.some(c => set.has(c));
+  const nCodes = nodeCodes(err);
+  const anyNodeCode = (set: Set<string>) => nCodes.some(c => set.has(c));
 
-  // Quota first: a 429 is quota whatever else the body says.
-  if (status === 429 || QUOTA_CLASSES.has(name) || has(QUOTA_CODES)) return { kind: 'quota', status };
+  // Quota first (before timeout): a 429 is quota whatever else the body says,
+  // even when it also carries a 408/timeout-class signal.
+  if (status === 429 || anyName(QUOTA_CLASSES) || has(QUOTA_CODES)) {
+    return { kind: 'quota', status, retryable: !has(PERMANENT_QUOTA_CODES) };
+  }
 
-  if (ABORT_CLASSES.has(name)) return { kind: 'aborted', status };
-  if (status === 408 || TIMEOUT_CLASSES.has(name) || TIMEOUT_CODES.has(err?.code)) return { kind: 'timeout', status };
+  if (anyName(ABORT_CLASSES)) return { kind: 'aborted', status, retryable: false };
+  if (status === 408 || anyName(TIMEOUT_CLASSES) || anyNodeCode(TIMEOUT_CODES)) {
+    return { kind: 'timeout', status, retryable: true };
+  }
 
-  if (status === 501 || status === 405 || status === 415 || has(UNSUPPORTED_CODES)) return { kind: 'unsupported', status };
+  if (status === 501 || status === 405 || status === 415 || has(UNSUPPORTED_CODES)) {
+    return { kind: 'unsupported', status, retryable: false };
+  }
+
+  if (status === 401 || status === 403 || anyName(AUTH_CLASSES) || has(AUTH_CODES)) {
+    return { kind: 'auth', status, retryable: false };
+  }
 
   if (status !== undefined) {
-    if (status >= 500) return { kind: 'provider_error', status };
-    if (status >= 400) return { kind: 'bad_request', status };
+    if (status >= 500) return { kind: 'provider_error', status, retryable: true };
+    if (status >= 400) return { kind: 'bad_request', status, retryable: false };
   }
-  if (SERVER_CLASSES.has(name) || NETWORK_CLASSES.has(name) || NETWORK_CODES.has(err?.code)) {
-    return { kind: 'provider_error', status };
+  if (anyName(SERVER_CLASSES) || anyName(NETWORK_CLASSES) || anyNodeCode(NETWORK_CODES)) {
+    return { kind: 'provider_error', status, retryable: true };
   }
   return { kind: 'unknown', status };
 }
@@ -136,24 +225,31 @@ export function trailEntry(member: { provider?: string; model?: string }, err: a
 }
 
 /**
- * Build the `failure` object for a failed execute() result. `trail` is the
- * per-member trail (last entry = the member whose error is being reported);
- * when absent (error thrown outside model invocation) provider/model come from
- * `fallback`.
+ * Build the `failure` object for a failed execute() result.
+ *
+ * Type-based classification applies ONLY to errors that came through
+ * invokeWithFallback (they carry `failureTrail`). Any other error (e.g. a tool
+ * handler's rethrown error, whose `.status` is unrelated to the LLM provider)
+ * is `unknown` — or `aborted` if the caller cancelled.
  */
 export function buildFailure(
   err: any,
   fallback: { provider?: string; model?: string },
   opts: { cancelled?: boolean } = {}
 ): ExecutorFailure {
-  const trail: FallbackTrailEntry[] = Array.isArray(err?.failureTrail) ? err.failureTrail : [];
-  const last = trail.length ? trail[trail.length - 1] : undefined;
-  const { kind, status } = classifyError(err, opts);
-  return {
-    kind,
-    status,
-    provider: last?.provider ?? fallback.provider,
-    model: last?.model ?? fallback.model,
+  const viaChain = Array.isArray(err?.failureTrail);
+  const trail: FallbackTrailEntry[] = viaChain ? err.failureTrail : [];
+  const member = err?.failureMember ?? (trail.length ? trail[trail.length - 1] : undefined);
+  const c = viaChain
+    ? classifyError(err, opts)
+    : { kind: (opts.cancelled ? 'aborted' : 'unknown') as ExecutorFailureKind, status: undefined, retryable: opts.cancelled ? false : undefined };
+  const out: ExecutorFailure = {
+    kind: c.kind,
+    status: c.status,
+    provider: member?.provider ?? fallback.provider,
+    model: member?.model ?? fallback.model,
     fallbackTrail: trail,
   };
+  if (c.retryable !== undefined) out.retryable = c.retryable;
+  return out;
 }

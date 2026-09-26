@@ -130,6 +130,8 @@ export interface InvokeResult {
    *  means (retry, park, surface to the user) is the caller's policy, not this
    *  package's. */
   stopReason?: string;
+  /** Earlier chain members that failed before this one succeeded (invokeWithFallback). */
+  fallbackTrail?: FallbackTrailEntry[];
 }
 
 /** Coarse, provider-independent failure category, derived from TYPED provider
@@ -138,7 +140,8 @@ export type ExecutorFailureKind =
   | 'quota'          // 429 or a provider quota/rate-limit code/class
   | 'timeout'        // idle/backstop stream abort, 408, timeout error class/code
   | 'aborted'        // the caller asked to stop
-  | 'unsupported'    // 501/405/415 or a provider "unsupported parameter/model" code
+  | 'unsupported'    // 501/405/415, a provider "unsupported parameter/model" code, or a chain member skipped for lack of an executorFactory
+  | 'auth'           // 401/403, AuthenticationError/PermissionDeniedError, AccessDenied codes (revoked/wrong key)
   | 'provider_error' // 5xx, overloaded, network failure
   | 'bad_request'    // other 4xx (schema, auth, tool-choice rejection, ...)
   | 'unknown';
@@ -160,6 +163,10 @@ export interface ExecutorFailure {
   model?: string;
   /** Every member tried (in order) with its own failure kind/status. */
   fallbackTrail: FallbackTrailEntry[];
+  /** Whether retrying the same request could plausibly succeed, from typed
+   *  signals. `kind` alone is NOT a retry instruction: `quota` may be permanent
+   *  (`insufficient_quota` => false). Undefined for `unknown`. */
+  retryable?: boolean;
 }
 
 export interface ExecutionResult {
@@ -169,8 +176,11 @@ export interface ExecutionResult {
   messages: Message[];
   error?: string;
   /** Structured failure detail; present iff execution threw. `error` (the
-   *  message string) is unchanged. */
+   *  message string) is unchanged. A cancel that does not throw has no `failure`. */
   failure?: ExecutorFailure;
+  /** On a SUCCESSFUL result: the members that failed before one succeeded
+   *  (present only when at least one did), so quota-then-success is visible. */
+  fallbackTrail?: FallbackTrailEntry[];
   paused?: boolean;
   pendingToolCall?: ToolCall;
 }
