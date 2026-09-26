@@ -132,12 +132,45 @@ export interface InvokeResult {
   stopReason?: string;
 }
 
+/** Coarse, provider-independent failure category, derived from TYPED provider
+ *  errors (status / error class / machine code) — never from message text. */
+export type ExecutorFailureKind =
+  | 'quota'          // 429 or a provider quota/rate-limit code/class
+  | 'timeout'        // idle/backstop stream abort, 408, timeout error class/code
+  | 'aborted'        // the caller asked to stop
+  | 'unsupported'    // 501/405/415 or a provider "unsupported parameter/model" code
+  | 'provider_error' // 5xx, overloaded, network failure
+  | 'bad_request'    // other 4xx (schema, auth, tool-choice rejection, ...)
+  | 'unknown';
+
+/** One model-chain member that was tried and failed. */
+export interface FallbackTrailEntry {
+  provider?: string;
+  model?: string;
+  kind: ExecutorFailureKind;
+  status?: number;
+}
+
+export interface ExecutorFailure {
+  kind: ExecutorFailureKind;
+  /** HTTP status of the final failing member, when the error carried one. */
+  status?: number;
+  /** Provider/model of the final failing member. */
+  provider?: string;
+  model?: string;
+  /** Every member tried (in order) with its own failure kind/status. */
+  fallbackTrail: FallbackTrailEntry[];
+}
+
 export interface ExecutionResult {
   ok: boolean;
   usage: Usage;
   result: any;
   messages: Message[];
   error?: string;
+  /** Structured failure detail; present iff execution threw. `error` (the
+   *  message string) is unchanged. */
+  failure?: ExecutorFailure;
   paused?: boolean;
   pendingToolCall?: ToolCall;
 }

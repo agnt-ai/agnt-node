@@ -34,6 +34,8 @@ import { SYSTEM_TOOL_NAMES } from './systemTools.js';
 import { normalizeToolResult } from './openclawAdapter.js';
 import { deepWellForm } from './wellFormed.js';
 import { StreamAbortError } from './providers/streaming.js';
+import { buildFailure, trailEntry } from './failure.js';
+import type { FallbackTrailEntry } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
 // A single completion is expected to request a handful of tool calls at once
@@ -517,6 +519,15 @@ export default class BaseExecutor {
 
     let lastError: any;
     const failures: Array<{ model: string; error: any }> = [];
+    // Normalised per-member trail (provider/model/kind/status) for the
+    // structured `failure` on execute()'s result. Distinct from `failures`,
+    // whose raw errors feed the legacy `fallbackTrail` message repair below.
+    const failureTrail: FallbackTrailEntry[] = [];
+    const attachTrail = (e: any): void => {
+      if (e && typeof e === 'object') {
+        try { e.failureTrail = [...failureTrail]; } catch { /* frozen error: skip */ }
+      }
+    };
 
     for (let i = 0; i < orderedModels.length; i++) {
       const modelConfig = orderedModels[i];
@@ -573,7 +584,9 @@ export default class BaseExecutor {
         // and returns normally) still can't cause the chain to fan out after
         // a cancel. Walking the remaining models here would issue a real,
         // billed request per fallback for work the caller already abandoned.
-        if (this.cancelled || options.signal?.aborted) throw error;
+        const stopped = !!(this.cancelled || options.signal?.aborted);
+        failureTrail.push(trailEntry(modelConfig, error, { cancelled: stopped }));
+        if (stopped) { attachTrail(error); throw error; }
 
         if (this.isFallbackEligible(error)) {
           this.log(`[BaseExecutor] ${modelConfig.model} failed (${error?.message ?? error}) — trying next model`);
@@ -581,6 +594,7 @@ export default class BaseExecutor {
           lastError = error;
           continue;
         }
+        attachTrail(error);
         throw error;
       }
     }
@@ -598,6 +612,7 @@ export default class BaseExecutor {
       lastError.fallbackTrail = failures;
       lastError.message = `${lastError.message} [all ${failures.length} models failed — ${trail}]`;
     }
+    attachTrail(lastError);
     throw lastError ?? new Error('[BaseExecutor] All models in the fallback list failed');
   }
 
@@ -850,7 +865,9 @@ export default class BaseExecutor {
         usage: { inputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalCostUSD: 0 },
         result: null,
         messages: this.messages,
-        error: error.message
+        error: error.message,
+        // Additive: structured detail so callers can tell quota from timeout etc.
+        failure: buildFailure(error, { provider: this.provider, model: this.model }, { cancelled: this.cancelled }),
       };
     }
   }
