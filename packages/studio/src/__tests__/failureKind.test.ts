@@ -266,6 +266,8 @@ describe('classifyError — names, cause chain, ordering', () => {
     expect(k(new OpenAI.PermissionDeniedError(403, undefined, 'x', new Headers()))).toBe('auth');
     expect(k(named('AccessDeniedException', { $metadata: { httpStatusCode: 400 } }))).toBe('auth');
     expect(k({ code: 'AccessDenied' })).toBe('auth');
+    expect(k(Object.assign(new Error('x'), { status: 401 }))).toBe('auth'); // bare status
+    expect(k(Object.assign(new Error('x'), { status: 403 }))).toBe('auth');
     // quota still wins over auth statuses
     expect(k(openaiErr(403, 'insufficient_quota'))).toBe('quota');
   });
@@ -290,6 +292,7 @@ describe('classifyError — names, cause chain, ordering', () => {
     expect(r(anthropicErr(400, 'invalid_request_error'))).toBe(false);
     expect(r(openaiErr(501, null))).toBe(false);
     expect(r(new StreamAbortError('external', 'x'))).toBe(false);
+    expect(r(Object.assign(new Error('x'), { code: 'ECONNRESET' }))).toBe(true);
     expect(r(new Error('x'))).toBeUndefined();
   });
 });
@@ -354,6 +357,29 @@ describe('success keeps the trail', () => {
     const r = await ex.execute();
     expect(r.ok).toBe(true);
     expect('fallbackTrail' in r).toBe(false);
+  });
+
+  it('trail does not leak between execute() calls on the same executor', async () => {
+    const ex = two();
+    ex.invoke.mockRejectedValueOnce(openaiErr(429, null)).mockResolvedValueOnce(OK).mockResolvedValueOnce(OK);
+    expect((await ex.execute()).fallbackTrail).toHaveLength(1);
+    const r2 = await ex.execute();
+    expect(r2.ok).toBe(true);
+    expect('fallbackTrail' in r2).toBe(false);
+  });
+
+  it('tool-call result path (no router) carries the trail too', async () => {
+    const m = manifest([{ provider: 'anthropic', model: 'a' }, { provider: 'anthropic', model: 'b' }]);
+    m.spec.enableToolCalls = true;
+    m.spec.tools = [{ name: 'out', description: 'd', parameters: { type: 'object', properties: {} } } as any];
+    const ex = new TestExecutor(cfg(m)) as any;
+    ex.invoke.mockRejectedValueOnce(openaiErr(429, null)).mockResolvedValueOnce({
+      message: { role: 'assistant', content: '', tool_calls: [{ id: 't', name: 'out', args: { a: 1 } }] }, usage: {},
+    });
+    const r = await ex.execute();
+    expect(r.ok).toBe(true);
+    expect(r.result).toEqual({ a: 1 });
+    expect(r.fallbackTrail).toEqual([{ provider: 'anthropic', model: 'a', kind: 'quota', status: 429 }]);
   });
 
   it('cross-provider success also carries the trail', async () => {

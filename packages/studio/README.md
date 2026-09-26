@@ -169,20 +169,38 @@ never from message text, so it is language-independent:
 
 ```ts
 if (!result.ok) {
-  const { kind, status, provider, model, fallbackTrail } = result.failure!;
-  // kind: 'quota' | 'timeout' | 'aborted' | 'unsupported' | 'provider_error' | 'bad_request' | 'unknown'
+  const { kind, status, provider, model, fallbackTrail, retryable } = result.failure!;
+  // kind: 'quota' | 'timeout' | 'aborted' | 'unsupported' | 'auth' | 'provider_error' | 'bad_request' | 'unknown'
   // fallbackTrail: [{ provider, model, kind, status }] — every model-chain member tried, in order
 }
 ```
 
 - `quota`: HTTP 429, or a quota/rate-limit class/code (OpenAI/Azure Foundry `rate_limit_exceeded`, `insufficient_quota`,
-  `RateLimitReached`; Anthropic `rate_limit_error`; Kimi `exceeded_current_quota_error`; Google `RESOURCE_EXHAUSTED`).
-- `timeout`: idle/backstop stream abort, HTTP 408, timeout error class or code. `aborted`: the caller stopped the run.
-- `unsupported`: HTTP 501/405/415 or an `unsupported_*`/`DeploymentNotFound` style code. `provider_error`: 5xx, overloaded, network.
-- `bad_request`: any other 4xx. `unknown`: no typed signal.
+  `RateLimitReached`; Anthropic `rate_limit_error`; Kimi `exceeded_current_quota_error`; Google `RESOURCE_EXHAUSTED`;
+  Bedrock `ThrottlingException`). Quota is checked before timeout. **Quota may be permanent**: `insufficient_quota` and
+  `exceeded_current_quota_error` are `quota` with `retryable: false`.
+- `timeout`: idle/backstop stream abort, HTTP 408, timeout error class or code (Node codes are read through `.cause`,
+  so `fetch failed` TypeErrors classify). `aborted`: the caller stopped the run.
+- `unsupported`: HTTP 501/405/415 or an `unsupported_*`/`DeploymentNotFound` style code; also a chain member that was
+  skipped in the trail because no `executorFactory` could build it.
+- `auth`: 401/403, `AuthenticationError`/`PermissionDeniedError`, AccessDenied codes (a revoked key is not a bad request).
+- `provider_error`: 5xx (including 529 overloaded), network failures. TLS/certificate errors stay `unknown`.
+- `bad_request`: any other 4xx. A 402 with no code is `bad_request`; a 402 carrying a quota code is `quota`.
+- `unknown`: no typed signal, **and every error that did not come through the model chain** (a tool handler's
+  rethrown error, a variable-validation error): a tool error's `.status` says nothing about the LLM provider.
+
+**`kind` is not a retry instruction.** Use `retryable` (true for 5xx/529, transient 429, timeouts; false for permanent
+quota, auth, unsupported, bad_request; absent for `unknown`).
+
+The SDK deliberately does NOT match message text. A transient failure a provider reports only in prose (for example
+Azure's "no deployments ready", an HTTP 400 with no code) is `bad_request`; a consumer that needs to catch it must do
+its own text match.
 
 Because a 429 is retried by the provider client, `streamWithRetry`, and then the next chain member, a 429 storm
 often ends as a `timeout` whose `fallbackTrail` shows only `quota` entries. Inspect the trail, not just `kind`.
+
+On success, a result has `fallbackTrail` (same entry shape) only when at least one earlier member failed, so a
+quota-then-success is visible. A cancel that does not throw returns `ok: false` with no `failure`.
 
 ## Logging
 
