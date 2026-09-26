@@ -34,6 +34,8 @@ import { SYSTEM_TOOL_NAMES } from './systemTools.js';
 import { normalizeToolResult } from './openclawAdapter.js';
 import { deepWellForm } from './wellFormed.js';
 import { StreamAbortError } from './providers/streaming.js';
+import { buildFailure, trailEntry } from './failure.js';
+import type { FallbackTrailEntry } from './types.js';
 import type { HookRegistry } from './hooks.js';
 
 // A single completion is expected to request a handful of tool calls at once
@@ -517,6 +519,19 @@ export default class BaseExecutor {
 
     let lastError: any;
     const failures: Array<{ model: string; error: any }> = [];
+    // Normalised per-member trail (provider/model/kind/status) for the
+    // structured `failure` on execute()'s result. Distinct from `failures`,
+    // whose raw errors feed the legacy `fallbackTrail` message repair below.
+    const failureTrail: FallbackTrailEntry[] = [];
+    let lastMember: { provider?: string; model?: string } | undefined;
+    const attachTrail = (e: any, member?: { provider?: string; model?: string }): void => {
+      if (e && typeof e === 'object') {
+        try {
+          e.failureTrail = [...failureTrail];
+          if (member) e.failureMember = { provider: member.provider, model: member.model };
+        } catch { /* frozen error: skip */ }
+      }
+    };
 
     for (let i = 0; i < orderedModels.length; i++) {
       const modelConfig = orderedModels[i];
@@ -537,6 +552,8 @@ export default class BaseExecutor {
           // narrowed to just this model) and delegate the single invoke.
           if (!this.executorFactory) {
             this.log(`[BaseExecutor] No executorFactory — cannot fall back to ${modelConfig.provider}/${modelConfig.model}, skipping`);
+            // Never tried: record it so the trail explains why the chain ended early.
+            failureTrail.push({ provider: modelConfig.provider, model: modelConfig.model, kind: 'unsupported' });
             continue;
           }
           const sub = await this.executorFactory({
@@ -554,7 +571,7 @@ export default class BaseExecutor {
           this.primaryModelConfig = { ...modelConfig, name: modelConfig.model };
           this.provider = modelConfig.provider;
           this.model = modelConfig.model;
-          return subResult;
+          return failureTrail.length ? { ...subResult, fallbackTrail: [...failureTrail] } : subResult;
         }
 
         if (i > 0) {
@@ -563,7 +580,8 @@ export default class BaseExecutor {
           this.provider = modelConfig.provider;
           this.model = modelConfig.model;
         }
-        return await this.invoke(messages, options);
+        const okResult = await this.invoke(messages, options);
+        return failureTrail.length ? { ...okResult, fallbackTrail: [...failureTrail] } : okResult;
       } catch (error: any) {
         // Shape-independent stop check, ahead of any error classification.
         // isFallbackEligible can only recognise a stop that arrived wearing
@@ -573,7 +591,10 @@ export default class BaseExecutor {
         // and returns normally) still can't cause the chain to fan out after
         // a cancel. Walking the remaining models here would issue a real,
         // billed request per fallback for work the caller already abandoned.
-        if (this.cancelled || options.signal?.aborted) throw error;
+        lastMember = modelConfig;
+        const stopped = !!(this.cancelled || options.signal?.aborted);
+        failureTrail.push(trailEntry(modelConfig, error, { cancelled: stopped }));
+        if (stopped) { attachTrail(error, modelConfig); throw error; }
 
         if (this.isFallbackEligible(error)) {
           this.log(`[BaseExecutor] ${modelConfig.model} failed (${error?.message ?? error}) — trying next model`);
@@ -581,6 +602,7 @@ export default class BaseExecutor {
           lastError = error;
           continue;
         }
+        attachTrail(error, modelConfig);
         throw error;
       }
     }
@@ -598,7 +620,9 @@ export default class BaseExecutor {
       lastError.fallbackTrail = failures;
       lastError.message = `${lastError.message} [all ${failures.length} models failed — ${trail}]`;
     }
-    throw lastError ?? new Error('[BaseExecutor] All models in the fallback list failed');
+    const finalError = lastError ?? new Error('[BaseExecutor] All models in the fallback list failed');
+    attachTrail(finalError, lastMember);
+    throw finalError;
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -750,7 +774,14 @@ export default class BaseExecutor {
   // Main execution
   // ─────────────────────────────────────────────────────────────────────────────
 
+  // Members that failed before a later member succeeded, across this execute()'s turns.
+  private recoveredTrail: FallbackTrailEntry[] = [];
+  private trailField(): { fallbackTrail?: FallbackTrailEntry[] } {
+    return this.recoveredTrail.length ? { fallbackTrail: [...this.recoveredTrail] } : {};
+  }
+
   async execute(): Promise<ExecutionResult> {
+    this.recoveredTrail = [];
     try {
       // Fire before_agent_start hook
       if (this.hooks?.has('before_agent_start')) {
@@ -791,6 +822,7 @@ export default class BaseExecutor {
         signal: this.abortController.signal,
       });
       const turnDuration = Date.now() - turnStart;
+      if (result.fallbackTrail?.length) this.recoveredTrail.push(...result.fallbackTrail);
 
       const usage: Usage = {
         inputTokens:          this.sumInputTokens(result.usage),         // total for display/Trace
@@ -811,7 +843,8 @@ export default class BaseExecutor {
           ok: !this.cancelled,
           usage,
           result: typeof content === 'string' ? content : content,
-          messages: this.messages
+          messages: this.messages,
+          ...this.trailField(),
         };
       }
 
@@ -828,7 +861,8 @@ export default class BaseExecutor {
             pendingToolCall: output.pendingToolCall,
             usage,
             result: null,
-            messages: this.messages
+            messages: this.messages,
+            ...this.trailField(),
           };
         }
       } else if (result.message.tool_calls && result.message.tool_calls.length > 0) {
@@ -842,7 +876,7 @@ export default class BaseExecutor {
         await this.hooks.fire('agent_end', { result: output, usage, cancelled: this.cancelled });
       }
 
-      return { ok: !this.cancelled, usage, result: output, messages: this.messages };
+      return { ok: !this.cancelled, usage, result: output, messages: this.messages, ...this.trailField() };
 
     } catch (error: any) {
       return {
@@ -850,7 +884,9 @@ export default class BaseExecutor {
         usage: { inputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, outputTokens: 0, totalCostUSD: 0 },
         result: null,
         messages: this.messages,
-        error: error.message
+        error: error.message,
+        // Additive: structured detail so callers can tell quota from timeout etc.
+        failure: buildFailure(error, { provider: this.provider, model: this.model }, { cancelled: this.cancelled }),
       };
     }
   }
@@ -936,6 +972,7 @@ export default class BaseExecutor {
       const turnStart = Date.now();
       const result = await this.invokeWithFallback(this.messages, { tools: this.allToolDefs, tool_choice: toolChoice, disableCache: this.disableCache, signal: this.abortController.signal });
       const turnDuration = Date.now() - turnStart;
+      if (result.fallbackTrail?.length) this.recoveredTrail.push(...result.fallbackTrail);
 
       usage.inputTokens         += this.sumInputTokens(result.usage);              // total for display
       usage.cacheCreationTokens += result.usage?.cache_creation_input_tokens || 0;
