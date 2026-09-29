@@ -512,6 +512,16 @@ export default class AzureFoundryExecutor extends BaseExecutor {
         const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
         return { type: 'input_image', image_url: url };
       }
+      // Cross-provider file-attachment block (see providers/fileAttachment.ts)
+      // → Responses API's input_file. Same fix as openai.ts's identical method
+      // — Foundry v1 mode serves the same Responses API and rejects `type:
+      // 'file'` with the same 400 ("Invalid value: 'file'. Supported values
+      // are: ... 'input_file' ...").
+      if (part.type === 'file') {
+        const filename = typeof part.file === 'string' ? undefined : part.file?.filename;
+        const file_data = typeof part.file === 'string' ? part.file : part.file?.file_data;
+        return { type: 'input_file', filename, file_data };
+      }
       return part;
     });
   }

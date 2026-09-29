@@ -8,8 +8,13 @@
  *   { type: 'file', file: { filename?: string, file_data: 'data:<mime>;base64,<b64>' } }
  *
  * Used for PDFs and other documents. Images use the separate `image_url` block.
- * Each provider adapter calls the matching helper below; OpenAI passes the block
- * through unchanged (its SDK accepts this shape directly).
+ * Each provider adapter calls the matching helper below; OpenAI's Chat
+ * Completions API passes the block through unchanged (its SDK accepts this
+ * shape directly there), but the Responses API does NOT — it requires
+ * translation to `{ type: 'input_file', filename, file_data }`. That
+ * translation lives in openai.ts/azureFoundry.ts's #formatResponsesContent
+ * (the Responses-API-only content formatter), not here, since this module's
+ * helpers are for the other (non-OpenAI-wire) providers.
  */
 
 /** Pull the base64 data URL string out of a file block (object or bare string). */

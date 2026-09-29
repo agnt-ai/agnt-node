@@ -221,6 +221,29 @@ describe('OpenAIExecutor reasoning-family routing (/v1/responses)', () => {
     });
   });
 
+  it('translates a `file` content block to input_file on the Responses path', async () => {
+    stubResponses();
+    const ex = new OpenAIExecutor(makeConfig('openai', 'gpt-5.6', {}));
+    await ex.invoke([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'look at this' },
+          { type: 'file', file: { filename: 'report.pdf', file_data: 'data:application/pdf;base64,JVBERi0x' } },
+        ],
+      },
+    ] as any);
+
+    const sent = openaiResponsesCreate.mock.calls[0][0];
+    const content = sent.input.find((i: any) => i.role === 'user').content;
+    expect(content).toContainEqual({ type: 'input_text', text: 'look at this' });
+    expect(content).toContainEqual({
+      type: 'input_file',
+      filename: 'report.pdf',
+      file_data: 'data:application/pdf;base64,JVBERi0x',
+    });
+  });
+
   it('leaves non-reasoning models (gpt-4o) on the Chat Completions path untouched', async () => {
     stubChat();
     const ex = new OpenAIExecutor(
