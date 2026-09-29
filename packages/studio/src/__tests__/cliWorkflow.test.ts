@@ -188,11 +188,11 @@ describe('agnt workflow push: what the API would reject or silently change', () 
     expect(body.category).toBeNull();
   });
 
-  it('refuses to create a non-active workflowStatus (the API would create it live) and never writes', async () => {
+  it('sends a non-active workflowStatus on create (staging honours it)', async () => {
     route();
-    await refused(runWorkflowPush(await file({ ...DEF, workflowStatus: 'paused' }), {}));
-    expect(err.join('\n')).toMatch(/cannot be set on create/);
-    expect(writes()).toHaveLength(0);
+    await runWorkflowPush(await file({ ...DEF, workflowStatus: 'paused' }), {});
+    expect(writes()).toHaveLength(1);
+    expect(writes()[0].body.workflowStatus).toBe('paused');
   });
 
   it('warns when a non-default field the create API ignores is set', async () => {

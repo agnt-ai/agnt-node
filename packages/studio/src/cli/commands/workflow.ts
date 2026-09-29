@@ -173,16 +173,8 @@ export async function runWorkflowPush(file: string, opts: WorkflowPushOptions): 
       skill = await client.updateSkill(id, patch);
       action = 'updated';
     } else {
-      // POST /skills has no workflowStatus field: it strips it, and the model
-      // default is 'active', so a paused/disabled definition would be created
-      // LIVE and scheduled. Refuse rather than start something the file says
-      // should be off.
-      if (def.workflowStatus !== undefined && def.workflowStatus !== 'active') {
-        throw new Error(
-          `workflowStatus '${stripControl(String(def.workflowStatus))}' cannot be set on create — the API always creates workflows active and schedules them. ` +
-          'Remove workflowStatus from the file (or set it to "active") to create it, then pause it from the console.',
-        );
-      }
+      // workflowStatus is sent on create: verified on staging (2026-09-29) that
+      // 'paused' is honoured (the workflow comes back 'disabled' and unscheduled).
       const body = prepareBody(def, 'create');
       for (const [f, isDefault] of Object.entries(CREATE_IGNORED_DEFAULTS)) {
         if (f in body && !isDefault(body[f])) console.error(`Warning: '${f}' is ignored by the create API and was not applied.`);

@@ -146,7 +146,7 @@ Server-managed fields (`id`, `origin`, `tier`, `createdBy`, `account`, timestamp
 - `userFacingPlan` is accepted on update but dropped on create (it is missing from the create schema), so it comes back `null` after a first `push`.
 - `user.*` system triggers can only be created from the console.
 - A user-scoped key cannot see hidden or draft skills in `list`; use an account-level key for those.
-- The create API has no `workflowStatus` field and always creates the workflow active (and schedules it), so `push` refuses a definition whose `workflowStatus` is anything but `"active"`. `status`, `followers`, `silentOnNoOp`, `processingBufferMs` and `skillCollection` are likewise ignored on create (a warning is printed when they are non-default).
+- `workflowStatus` is honoured on create (verified on staging: `"paused"` comes back `"disabled"` and is not scheduled). `status`, `followers`, `silentOnNoOp`, `processingBufferMs` and `skillCollection` are, however, ignored on create (a warning is printed when they are non-default).
 - `list` shows one row per install, so a workflow installed more than once can appear twice; this comes from `GET /skills`, not the CLI.
 
 ## Programmatic use
