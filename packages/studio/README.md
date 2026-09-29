@@ -111,6 +111,34 @@ agnt eval list --max-score 2 --json
 
 Every review names the task and chat it is about, in full. `agnt eval get` prints the commands that follow it to the run: `agnt run task <taskId>` for the tool-call timeline, `agnt run chat <chatId>` for the conversation, and the LangSmith query for the trace.
 
+### `agnt workflow` — push, pull and list workflow skills
+
+Keep a workflow (a Skill with `kind: "workflow"`) in git as a JSON file. Uses the same routes as the console (`POST /skills`, `PATCH /skills/:id`), so triggers are stamped and the workflow is scheduled; it does not use the manifest import route.
+
+```bash
+agnt workflow list [--json]
+agnt workflow pull daily-digest -o daily-digest.json    # omit -o to print to stdout
+agnt workflow push daily-digest.json                    # create; fails if the name exists
+agnt workflow push daily-digest.json --update           # update in place (name cannot change)
+# all accept --profile <name>
+```
+
+Example definition (`kind` defaults to `workflow`; `name` is a lowercase slug):
+
+```json
+{
+  "name": "daily-digest",
+  "title": "Daily digest",
+  "description": "Summarise the day each morning",
+  "scheduleType": "trigger-based",
+  "workflowStatus": "active",
+  "hidden": false,
+  "triggers": [{ "on": "cron", "schedule": "0 9 * * *" }]
+}
+```
+
+Server-managed fields (`id`, `origin`, `tier`, `createdBy`, `account`, timestamps, run counters) are dropped on pull and ignored on push.
+
 ## Programmatic use
 
 ### `AgntExecutor`

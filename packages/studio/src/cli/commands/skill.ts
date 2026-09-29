@@ -87,7 +87,7 @@ const RESOLVE_SEARCH_LIMIT = 200;
  * GET /skills (list, `q` search — a real Skill.find query, not this bug),
  * then always fetching by id.
  */
-async function resolveSkill(client: AgntApiClient, idOrName: string): Promise<SkillSummary> {
+export async function resolveSkill(client: AgntApiClient, idOrName: string): Promise<SkillSummary> {
   if (isObjectIdLike(idOrName)) {
     return client.getSkill(idOrName);
   }
