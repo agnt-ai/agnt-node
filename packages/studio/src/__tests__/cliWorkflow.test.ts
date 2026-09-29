@@ -161,7 +161,77 @@ describe('agnt workflow push', () => {
   });
 });
 
+describe('agnt workflow push: what the API would reject or silently change', () => {
+  // Shape of a real pull: serialize() emits null for unset optional fields.
+  const PULLED = {
+    ...DEF, whenToUse: null, instructions: null, mcpSource: null, mcpAuthServerUrl: null, mcpTransport: null,
+    category: null, companionSkill: null, modelTier: null, maxRuns: null, followers: [], processingBufferMs: 300000,
+    silentOnNoOp: false, status: 'active', skillCollection: null,
+  };
+
+  it('create omits nulls that POST /skills rejects but keeps meaningful nulls, and drops server-ignored defaults quietly', async () => {
+    route();
+    await runWorkflowPush(await file(PULLED), {});
+    const body = writes()[0].body;
+    for (const f of ['whenToUse', 'instructions', 'mcpSource', 'mcpAuthServerUrl', 'mcpTransport', 'category', 'companionSkill',
+      'status', 'followers', 'processingBufferMs', 'silentOnNoOp', 'skillCollection']) expect(body).not.toHaveProperty(f);
+    expect(body.modelTier).toBeNull();
+    expect(body.maxRuns).toBeNull();
+    expect(err.join('\n')).not.toMatch(/Warning/);
+  });
+
+  it('update omits the always-rejected nulls but keeps PATCH-nullable ones (so null can still clear)', async () => {
+    route({ list: [{ id: ID, name: 'daily-digest', kind: 'workflow' }] });
+    await runWorkflowPush(await file(PULLED), { update: true });
+    const body = writes()[0].body;
+    for (const f of ['whenToUse', 'instructions', 'mcpAuthServerUrl']) expect(body).not.toHaveProperty(f);
+    expect(body.category).toBeNull();
+  });
+
+  it('refuses to create a non-active workflowStatus (the API would create it live) and never writes', async () => {
+    route();
+    await refused(runWorkflowPush(await file({ ...DEF, workflowStatus: 'paused' }), {}));
+    expect(err.join('\n')).toMatch(/cannot be set on create/);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it('warns when a non-default field the create API ignores is set', async () => {
+    route();
+    await runWorkflowPush(await file({ ...DEF, followers: ['a@b.co'] }), {});
+    expect(err.join('\n')).toMatch(/'followers' is ignored/);
+    expect(writes()[0].body).not.toHaveProperty('followers');
+  });
+
+  it('accepts a file with a UTF-8 BOM', async () => {
+    route();
+    const p = join(dir, 'bom.json');
+    await writeFile(p, '\uFEFF' + JSON.stringify(DEF));
+    await runWorkflowPush(p, {});
+    expect(writes()[0].method).toBe('POST');
+  });
+
+  it('finds an exact-name match that is not on the first page of the substring search', async () => {
+    const filler = Array.from({ length: 200 }, (_, i) => ({ id: `f${i}`, name: `daily-digest-${i}`, kind: 'workflow' }));
+    fetchMock.mockImplementation(async (url: any, init?: RequestInit) => {
+      const path = String(url).replace('https://api.test', '');
+      if (path.startsWith('/skills?')) {
+        const page = Number(new URL('https://x' + path).searchParams.get('page') ?? 1);
+        return json({ ok: true, total: 201, skills: page === 1 ? filler : [{ id: ID, name: 'daily-digest', kind: 'workflow' }] });
+      }
+      return json({ error: `unexpected ${init?.method} ${path}` }, 500);
+    });
+    await refused(runWorkflowPush(await file(DEF), {}));
+    expect(err.join('\n')).toMatch(/already exists — pass --update/);
+  });
+});
+
 describe('agnt workflow pull', () => {
+  it('does not warn about duplicate skills when the list repeats one row per install', async () => {
+    route({ list: [{ id: ID, name: 'daily-digest', kind: 'workflow' }, { id: ID, name: 'daily-digest', kind: 'workflow' }] });
+    await runWorkflowPull('daily-digest', {});
+    expect(err.join('\n')).not.toMatch(/Warning/);
+  });
+
   it('resolves by name, strips server fields, and prints the definition', async () => {
     route({ list: [{ id: ID, name: 'daily-digest', kind: 'workflow' }] });
     await runWorkflowPull('daily-digest', {});

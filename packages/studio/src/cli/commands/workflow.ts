@@ -47,6 +47,35 @@ const SERVER_MANAGED_FIELDS = [
   'origin', 'tier', 'createdBy', 'version', 'versions', '__v',
 ];
 
+// Fields the server's serializer emits as `null` (or that the schema otherwise
+// cannot take as null) but whose request schema is `z.string()...optional()`
+// with no `.nullable()`: sending the null back is a 400 ("whenToUse: Invalid
+// input"), so a pulled file would not push. Omitting them means "unset".
+const NULL_REJECTED_ALWAYS = [
+  'whenToUse', 'instructions', 'mcpSource', 'mcpServerUrl', 'mcpAuthServerUrl', 'mcpTransport', 'pricing', 'folder',
+];
+// Nullable on PATCH (null clears them) but not accepted as null by POST.
+const NULL_REJECTED_ON_CREATE = ['category', 'secondaryCategory', 'setupDifficulty', 'capabilities', 'companionSkill'];
+
+// CreateSkillBodySchema does not declare these, so POST /skills silently strips
+// them (PATCH accepts them). Value = the server default; a file that differs
+// from it gets a warning instead of a silent no-op.
+const CREATE_IGNORED_DEFAULTS: Record<string, (v: any) => boolean> = {
+  status: v => v === 'active',
+  followers: v => Array.isArray(v) && v.length === 0,
+  silentOnNoOp: v => v === false,
+  processingBufferMs: v => v === 300000,
+  skillCollection: v => v === null,
+};
+
+/** Body for POST /skills / PATCH /skills/:id: drop nulls the schema rejects. */
+export function prepareBody(def: Record<string, any>, mode: 'create' | 'update'): Record<string, any> {
+  const out: Record<string, any> = { ...def };
+  const drop = mode === 'create' ? [...NULL_REJECTED_ALWAYS, ...NULL_REJECTED_ON_CREATE] : NULL_REJECTED_ALWAYS;
+  for (const f of drop) if (out[f] === null) delete out[f];
+  return out;
+}
+
 function fail(err: any): never {
   console.error(stripControl(err?.message ?? String(err)));
   process.exit(1);
@@ -89,8 +118,16 @@ export function validateDefinition(parsed: unknown): Record<string, any> {
 async function findByName(client: AgntApiClient, name: string): Promise<SkillSummary | null> {
   // `q` substring-matches; ask for the max page so an exact match isn't pushed
   // off the first page by similarly named skills (same approach as resolveSkill).
-  const { skills } = await client.listSkills({ q: name, limit: 200 });
-  return skills.find(s => s.name === name) ?? null;
+  // Page on: `q` also matches descriptions and file content, and the list is
+  // newest-first, so the exact match can sit beyond page 1.
+  const limit = 200;
+  for (let page = 1; page <= 10; page++) {
+    const { skills, total } = await client.listSkills({ q: name, limit, page });
+    const hit = skills.find(s => s.name === name);
+    if (hit) return hit;
+    if (skills.length < limit || (total !== undefined && page * limit >= total)) break;
+  }
+  return null;
 }
 
 function positiveInt(flag: string, v: string | undefined): number | undefined {
@@ -111,7 +148,7 @@ export async function runWorkflowPush(file: string, opts: WorkflowPushOptions): 
     const { readFile } = await import('fs/promises');
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await readFile(file, 'utf-8'));
+      parsed = JSON.parse((await readFile(file, 'utf-8')).replace(/^\uFEFF/, ''));
     } catch (e: any) {
       throw new Error(`Could not read ${file} as JSON: ${e.message}`);
     }
@@ -132,12 +169,27 @@ export async function runWorkflowPush(file: string, opts: WorkflowPushOptions): 
       const id = existing.id ?? existing._id;
       if (!id) throw new Error(`Could not resolve an id for '${def.name}'`);
       // Renaming is not supported, and kind must not change on update.
-      const { name: _name, kind: _kind, ...patch } = def;
+      const { name: _name, kind: _kind, ...patch } = prepareBody(def, 'update');
       skill = await client.updateSkill(id, patch);
       action = 'updated';
     } else {
+      // POST /skills has no workflowStatus field: it strips it, and the model
+      // default is 'active', so a paused/disabled definition would be created
+      // LIVE and scheduled. Refuse rather than start something the file says
+      // should be off.
+      if (def.workflowStatus !== undefined && def.workflowStatus !== 'active') {
+        throw new Error(
+          `workflowStatus '${stripControl(String(def.workflowStatus))}' cannot be set on create — the API always creates workflows active and schedules them. ` +
+          'Remove workflowStatus from the file (or set it to "active") to create it, then pause it from the console.',
+        );
+      }
+      const body = prepareBody(def, 'create');
+      for (const [f, isDefault] of Object.entries(CREATE_IGNORED_DEFAULTS)) {
+        if (f in body && !isDefault(body[f])) console.error(`Warning: '${f}' is ignored by the create API and was not applied.`);
+        delete body[f];
+      }
       try {
-        skill = await client.createSkill(def);
+        skill = await client.createSkill(body);
       } catch (e: any) {
         // A user-scoped key never lists hidden/draft skills, so a name can
         // exist without findByName seeing it — surface that instead of a bare 409.
@@ -153,8 +205,8 @@ export async function runWorkflowPush(file: string, opts: WorkflowPushOptions): 
       console.log(safeJson({ action, skill }));
       return;
     }
-    const id = skill?.id ?? skill?._id ?? '?';
-    console.log(`Workflow ${action}: ${stripControl(skill?.name ?? def.name)} (${id}) [${skill?.workflowStatus ?? 'no status'}]`);
+    const id = stripControl(String(skill?.id ?? skill?._id ?? '?'));
+    console.log(`Workflow ${action}: ${stripControl(skill?.name ?? def.name)} (${id}) [${stripControl(String(skill?.workflowStatus ?? 'no status'))}]`);
   } catch (err: any) {
     fail(err);
   }
@@ -218,9 +270,9 @@ export async function runWorkflowList(opts: WorkflowListOptions): Promise<void> 
       return;
     }
     for (const s of skills) {
-      const id = s.id ?? s._id ?? '?';
+      const id = stripControl(String(s.id ?? s._id ?? '?'));
       const triggers = Array.isArray(s.triggers) ? `${s.triggers.length} trigger(s)` : '';
-      const line = `${id}  [${s.workflowStatus ?? s.status ?? '?'}/${s.scheduleType ?? '?'}]  ${stripControl(s.name ?? '?')}  ${stripControl(s.title ?? '')}  ${triggers}`;
+      const line = `${id}  [${stripControl(String(s.workflowStatus ?? s.status ?? '?'))}/${stripControl(String(s.scheduleType ?? '?'))}]  ${stripControl(s.name ?? '?')}  ${stripControl(s.title ?? '')}  ${triggers}`;
       console.log(`  ${line.trimEnd()}`);
     }
   } catch (err: any) {

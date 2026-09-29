@@ -141,12 +141,13 @@ Server-managed fields (`id`, `origin`, `tier`, `createdBy`, `account`, timestamp
 
 **Known limits (verified against staging, 2026-09-29)**
 
-- `list`, `pull` and create-`push` work with an API key. A created workflow round-trips through `pull` (the server normalises `workflowStatus: "paused"` to `"disabled"` and adds trigger `_id`, `intelligenceTier` and `subTriggers`).
+- `list`, `pull` and create-`push` work with an API key. A created workflow round-trips through `pull` (the server adds trigger `_id`, `intelligenceTier` and `subTriggers`).
 - `push --update` was refused by the API with `403 You can only edit skills you own` on a workflow the same key had just created. Until the backend accepts it, change an existing workflow in the console.
 - `userFacingPlan` is accepted on update but dropped on create (it is missing from the create schema), so it comes back `null` after a first `push`.
 - `user.*` system triggers can only be created from the console.
 - A user-scoped key cannot see hidden or draft skills in `list`; use an account-level key for those.
-- Only a definition with `"workflowStatus": "active"` is scheduled on create.
+- The create API has no `workflowStatus` field and always creates the workflow active (and schedules it), so `push` refuses a definition whose `workflowStatus` is anything but `"active"`. `status`, `followers`, `silentOnNoOp`, `processingBufferMs` and `skillCollection` are likewise ignored on create (a warning is printed when they are non-default).
+- `list` shows one row per install, so a workflow installed more than once can appear twice; this comes from `GET /skills`, not the CLI.
 
 ## Programmatic use
 

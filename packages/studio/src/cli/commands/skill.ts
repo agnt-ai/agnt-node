@@ -92,7 +92,16 @@ export async function resolveSkill(client: AgntApiClient, idOrName: string): Pro
     return client.getSkill(idOrName);
   }
   const { skills } = await client.listSkills({ q: idOrName, limit: RESOLVE_SEARCH_LIMIT });
-  const matches = skills.filter(s => s.name === idOrName);
+  // GET /skills returns one row per SkillInstall, so a skill with more than one
+  // install (account-wide + a user's) comes back twice — count each id once.
+  const seen = new Set<string>();
+  const matches = skills.filter(s => {
+    if (s.name !== idOrName) return false;
+    const key = String(s.id ?? s._id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   if (!matches.length) throw new Error(`Skill '${idOrName}' not found`);
   if (matches.length > 1) {
     // `name` is unique per account (schema index) — this should be
