@@ -13,6 +13,7 @@ import {
   runSkillList, runSkillGet, runSkillCreate, runSkillUpdate,
   runSkillPush, runSkillExport, runSkillPublish,
 } from './commands/skill.js';
+import { runWorkflowPush, runWorkflowPull, runWorkflowList } from './commands/workflow.js';
 
 const program = new Command();
 
@@ -224,6 +225,41 @@ skillCmd
   .option('--json', 'Print raw JSON instead of a human-readable summary')
   .action(async (nameOrId, opts) => {
     await runSkillPublish(nameOrId, opts);
+  });
+
+const workflowCmd = program
+  .command('workflow')
+  .description('Push, pull and list workflow skills from JSON definition files — needs an API key');
+
+workflowCmd
+  .command('push <file>')
+  .description('Create a workflow from a JSON definition file (uses POST /skills, so triggers are stamped and scheduled like the console). Fails if it exists unless --update; --update may be refused (403) for API keys, see README known limits')
+  .option('--update', 'Update the workflow in place if one with this name already exists')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable summary')
+  .action(async (file, opts) => {
+    await runWorkflowPush(file, opts);
+  });
+
+workflowCmd
+  .command('pull <name>')
+  .description('Print a workflow as a definition JSON (or save with -o); round-trips with `agnt workflow push --update`')
+  .option('-o, --output <path>', 'Write to a file instead of stdout (refuses to overwrite an existing file)')
+  .option('--force', 'With -o, overwrite an existing file')
+  .option('--profile <name>', 'Credentials profile to use')
+  .action(async (name, opts) => {
+    await runWorkflowPull(name, opts);
+  });
+
+workflowCmd
+  .command('list')
+  .description('List workflows in the account')
+  .option('--limit <n>', 'Max results', '50')
+  .option('--page <n>', 'Page number', '1')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON instead of a human-readable list')
+  .action(async (opts) => {
+    await runWorkflowList(opts);
   });
 
 program.parse(process.argv);

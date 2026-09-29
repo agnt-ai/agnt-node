@@ -111,6 +111,44 @@ agnt eval list --max-score 2 --json
 
 Every review names the task and chat it is about, in full. `agnt eval get` prints the commands that follow it to the run: `agnt run task <taskId>` for the tool-call timeline, `agnt run chat <chatId>` for the conversation, and the LangSmith query for the trace.
 
+### `agnt workflow` — push, pull and list workflow skills
+
+Keep a workflow (a Skill with `kind: "workflow"`) in git as a JSON file. Uses the same routes as the console (`POST /skills`, `PATCH /skills/:id`), so triggers are stamped and the workflow is scheduled; it does not use the manifest import route.
+
+```bash
+agnt workflow list [--json]
+agnt workflow pull daily-digest -o daily-digest.json    # omit -o to print to stdout
+agnt workflow push daily-digest.json                    # create; fails if the name exists
+agnt workflow push daily-digest.json --update           # update in place (name cannot change)
+# all accept --profile <name>
+```
+
+Example definition (`kind` defaults to `workflow`; `name` is a lowercase slug):
+
+```json
+{
+  "name": "daily-digest",
+  "title": "Daily digest",
+  "description": "Summarise the day each morning",
+  "scheduleType": "trigger-based",
+  "workflowStatus": "active",
+  "hidden": false,
+  "triggers": [{ "on": "cron", "schedule": "0 9 * * *" }]
+}
+```
+
+Server-managed fields (`id`, `origin`, `tier`, `createdBy`, `account`, `followers`, `billedTo`, `triggerSources`, timestamps, run counters) are dropped on pull and ignored on push.
+
+**Known limits (verified against staging, 2026-09-29)**
+
+- `list`, `pull` and create-`push` work with an API key. A created workflow round-trips through `pull` (the server adds trigger `_id`, `intelligenceTier` and `subTriggers`).
+- `push --update` was refused by the API with `403 You can only edit skills you own` on a workflow the same key had just created. Until the backend accepts it, change an existing workflow in the console.
+- `userFacingPlan` is accepted on update but dropped on create (it is missing from the create schema), so it comes back `null` after a first `push`.
+- `user.*` system triggers can only be created from the console.
+- A user-scoped key cannot see hidden or draft skills in `list`; use an account-level key for those.
+- `workflowStatus` is honoured on create (verified on staging: `"paused"` comes back `"disabled"` and is not scheduled). `status`, `followers`, `silentOnNoOp`, `processingBufferMs` and `skillCollection` are, however, ignored on create (a warning is printed when they are non-default).
+- `list` shows one row per install, so a workflow installed more than once can appear twice; this comes from `GET /skills`, not the CLI.
+
 ## Programmatic use
 
 ### `AgntExecutor`
