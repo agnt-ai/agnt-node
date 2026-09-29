@@ -45,6 +45,8 @@ const SERVER_MANAGED_FIELDS = [
   'id', '_id', 'account', 'ownerSlug', 'installation', 'createdAt', 'updatedAt',
   'runCount', 'lastRunAt', 'exhaustedReason', 'enrichmentStatus',
   'origin', 'tier', 'createdBy', 'version', 'versions', '__v',
+  // Tenant-scoped / server-managed: people, billing and trigger wiring do not belong in a definition file kept in git.
+  'followers', 'billedTo', 'triggerSources',
 ];
 
 // Fields the server's serializer emits as `null` (or that the schema otherwise
@@ -62,7 +64,6 @@ const NULL_REJECTED_ON_CREATE = ['category', 'secondaryCategory', 'setupDifficul
 // from it gets a warning instead of a silent no-op.
 const CREATE_IGNORED_DEFAULTS: Record<string, (v: any) => boolean> = {
   status: v => v === 'active',
-  followers: v => Array.isArray(v) && v.length === 0,
   silentOnNoOp: v => v === false,
   processingBufferMs: v => v === 300000,
   skillCollection: v => v === null,
@@ -170,7 +171,14 @@ export async function runWorkflowPush(file: string, opts: WorkflowPushOptions): 
       if (!id) throw new Error(`Could not resolve an id for '${def.name}'`);
       // Renaming is not supported, and kind must not change on update.
       const { name: _name, kind: _kind, ...patch } = prepareBody(def, 'update');
-      skill = await client.updateSkill(id, patch);
+      try {
+        skill = await client.updateSkill(id, patch);
+      } catch (e: any) {
+        if (/\(403\)/.test(e?.message ?? '')) {
+          throw new Error(`${e.message}\nHint: the API may refuse to update this workflow for API keys; see the README known limits, or edit it in the console.`);
+        }
+        throw e;
+      }
       action = 'updated';
     } else {
       // workflowStatus is sent on create: verified on staging (2026-09-29) that

@@ -39,7 +39,7 @@ const calls = () => fetchMock.mock.calls.map(([u, init]) => ({
 }));
 const writes = () => calls().filter(c => c.method !== 'GET');
 
-function route(over: { list?: any[]; createStatus?: number } = {}) {
+function route(over: { list?: any[]; createStatus?: number; patchStatus?: number } = {}) {
   fetchMock.mockImplementation(async (url: any, init?: RequestInit) => {
     const path = String(url).replace('https://api.test', '');
     const method = init?.method ?? 'GET';
@@ -48,9 +48,10 @@ function route(over: { list?: any[]; createStatus?: number } = {}) {
       if (over.createStatus) return new Response('{"error":"Skill exists"}', { status: over.createStatus });
       return json({ ok: true, skill: { id: ID, name: 'daily-digest', kind: 'workflow', workflowStatus: 'active' } }, 201);
     }
+    if (path === `/skills/${ID}` && method === 'PATCH' && over.patchStatus) return json({ ok: false, error_code: 'forbidden', message: 'You can only edit skills you own' }, over.patchStatus);
     if (path === `/skills/${ID}` && method === 'PATCH') return json({ ok: true, skill: { id: ID, name: 'daily-digest', kind: 'workflow', workflowStatus: 'active' } });
     if (path === `/skills/${ID}` && method === 'GET') {
-      return json({ ok: true, skill: { ...DEF, id: ID, _id: ID, kind: 'workflow', origin: 'portal', tier: 'community', account: 'a1', createdAt: 'x', runCount: 3 } });
+      return json({ ok: true, skill: { ...DEF, id: ID, _id: ID, kind: 'workflow', origin: 'portal', tier: 'community', account: 'a1', createdAt: 'x', runCount: 3, followers: ['a@b.c'], billedTo: 'u1', triggerSources: [{ id: 't' }] } });
     }
     return json({ error: `unexpected ${method} ${path}` }, 500);
   });
@@ -127,6 +128,12 @@ describe('agnt workflow push', () => {
     expect(out.join('\n')).toMatch(/Workflow updated/);
   });
 
+  it('--update 403 prints a hint pointing at the known limit', async () => {
+    route({ list: [{ id: ID, name: 'daily-digest', kind: 'workflow' }], patchStatus: 403 });
+    await refused(runWorkflowPush(await file(DEF), { update: true }));
+    expect(err.join('\n')).toMatch(/\(403\)[\s\S]*Hint:.*README/);
+  });
+
   it('does not match a different skill whose name merely contains the slug', async () => {
     route({ list: [{ id: 'other', name: 'daily-digest-2', kind: 'workflow' }] });
     await runWorkflowPush(await file(DEF), {});
@@ -197,9 +204,15 @@ describe('agnt workflow push: what the API would reject or silently change', () 
 
   it('warns when a non-default field the create API ignores is set', async () => {
     route();
-    await runWorkflowPush(await file({ ...DEF, followers: ['a@b.co'] }), {});
-    expect(err.join('\n')).toMatch(/'followers' is ignored/);
-    expect(writes()[0].body).not.toHaveProperty('followers');
+    await runWorkflowPush(await file({ ...DEF, silentOnNoOp: true }), {});
+    expect(err.join('\n')).toMatch(/'silentOnNoOp' is ignored/);
+    expect(writes()[0].body).not.toHaveProperty('silentOnNoOp');
+  });
+
+  it('never sends followers/billedTo/triggerSources from a file', async () => {
+    route();
+    await runWorkflowPush(await file({ ...DEF, followers: ['a@b.co'], billedTo: 'u1', triggerSources: [{ id: 't' }] }), {});
+    for (const f of ['followers', 'billedTo', 'triggerSources']) expect(writes()[0].body).not.toHaveProperty(f);
   });
 
   it('accepts a file with a UTF-8 BOM', async () => {
@@ -237,7 +250,7 @@ describe('agnt workflow pull', () => {
     await runWorkflowPull('daily-digest', {});
     const def = JSON.parse(out.join(''));
     expect(def).toMatchObject(DEF);
-    for (const f of ['id', '_id', 'origin', 'tier', 'account', 'createdAt', 'runCount']) expect(def).not.toHaveProperty(f);
+    for (const f of ['id', '_id', 'origin', 'tier', 'account', 'createdAt', 'runCount', 'followers', 'billedTo', 'triggerSources']) expect(def).not.toHaveProperty(f);
   });
 
   it('refuses a non-workflow skill', async () => {

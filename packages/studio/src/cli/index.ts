@@ -233,7 +233,7 @@ const workflowCmd = program
 
 workflowCmd
   .command('push <file>')
-  .description('Create a workflow from a JSON definition file (uses POST /skills, so triggers are stamped and scheduled like the console). Fails if it exists unless --update; note --update is currently refused (403) by the API for API keys, see README')
+  .description('Create a workflow from a JSON definition file (uses POST /skills, so triggers are stamped and scheduled like the console). Fails if it exists unless --update; --update may be refused (403) for API keys, see README known limits')
   .option('--update', 'Update the workflow in place if one with this name already exists')
   .option('--profile <name>', 'Credentials profile to use')
   .option('--json', 'Print raw JSON instead of a human-readable summary')

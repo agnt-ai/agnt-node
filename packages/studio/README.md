@@ -137,7 +137,7 @@ Example definition (`kind` defaults to `workflow`; `name` is a lowercase slug):
 }
 ```
 
-Server-managed fields (`id`, `origin`, `tier`, `createdBy`, `account`, timestamps, run counters) are dropped on pull and ignored on push.
+Server-managed fields (`id`, `origin`, `tier`, `createdBy`, `account`, `followers`, `billedTo`, `triggerSources`, timestamps, run counters) are dropped on pull and ignored on push.
 
 **Known limits (verified against staging, 2026-09-29)**
 
