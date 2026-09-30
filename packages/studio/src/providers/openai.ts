@@ -379,6 +379,16 @@ export default class OpenAIExecutor extends BaseExecutor {
         const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
         return { type: 'input_image', image_url: url };
       }
+      // Cross-provider file-attachment block (see providers/fileAttachment.ts)
+      // → Responses API's input_file. Chat Completions accepts `{ type:'file',
+      // file:{ filename, file_data } }` as-is, but the Responses API rejects it
+      // outright ("Invalid value: 'file'. Supported values are: ...
+      // 'input_file' ...") — this was reaching OpenAI unmapped and 400ing.
+      if (part.type === 'file') {
+        const filename = typeof part.file === 'string' ? undefined : part.file?.filename;
+        const file_data = typeof part.file === 'string' ? part.file : part.file?.file_data;
+        return { type: 'input_file', filename, file_data };
+      }
       return part;
     });
   }

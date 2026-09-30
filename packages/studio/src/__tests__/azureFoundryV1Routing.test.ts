@@ -123,6 +123,29 @@ describe('AzureFoundryExecutor — reasoning-family routing (v1 mode only)', () 
     expect(sent.tools[0].function).toBeUndefined();
   });
 
+  it('translates a `file` content block to input_file on the Responses path', async () => {
+    stubResponses();
+    const ex = new AzureFoundryExecutor(makeConfig(V1_ENDPOINT, 'gpt-5.6-luna'));
+    await ex.invoke([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'look at this' },
+          { type: 'file', file: { filename: 'report.pdf', file_data: 'data:application/pdf;base64,JVBERi0x' } },
+        ],
+      },
+    ] as any);
+
+    const sent = azureResponsesCreate.mock.calls[0][0];
+    const content = sent.input.find((i: any) => i.role === 'user').content;
+    expect(content).toContainEqual({ type: 'input_text', text: 'look at this' });
+    expect(content).toContainEqual({
+      type: 'input_file',
+      filename: 'report.pdf',
+      file_data: 'data:application/pdf;base64,JVBERi0x',
+    });
+  });
+
   it('maps Responses output + usage back into InvokeResult', async () => {
     azureResponsesCreate.mockImplementation(async () =>
       openAIResponsesStreamFromResponse({

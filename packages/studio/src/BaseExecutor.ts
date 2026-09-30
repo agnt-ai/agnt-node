@@ -527,8 +527,9 @@ export default class BaseExecutor {
     const attachTrail = (e: any, member?: { provider?: string; model?: string }): void => {
       if (e && typeof e === 'object') {
         try {
-          e.failureTrail = [...failureTrail];
-          if (member) e.failureMember = { provider: member.provider, model: member.model };
+          // Non-enumerable so they don't leak into JSON.stringify / loggers.
+          Object.defineProperty(e, 'failureTrail', { value: [...failureTrail], enumerable: false, writable: true, configurable: true });
+          if (member) Object.defineProperty(e, 'failureMember', { value: { provider: member.provider, model: member.model }, enumerable: false, writable: true, configurable: true });
         } catch { /* frozen error: skip */ }
       }
     };

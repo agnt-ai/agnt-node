@@ -448,3 +448,20 @@ describe('real provider executors surface typed failures through execute()', () 
     expect((await ex.execute()).failure).toMatchObject({ kind: 'provider_error', status: 503 });
   });
 });
+
+describe('thrown error trail properties', () => {
+  it('failureTrail/failureMember are non-enumerable but readable', async () => {
+    const ex = new TestExecutor(cfg(manifest([{ provider: 'openai', model: 'gpt-x' }]))) as any;
+    ex.invoke.mockRejectedValue(openaiErr(429, 'rate_limit_exceeded'));
+    let thrown: any;
+    try { await ex.invokeWithFallback([], {}); } catch (e) { thrown = e; }
+    expect(thrown).toBeDefined();
+    for (const k of ['failureTrail', 'failureMember']) {
+      expect(Object.keys(thrown)).not.toContain(k);
+      expect(JSON.stringify(thrown)).not.toContain(k);
+      expect(Object.getOwnPropertyDescriptor(thrown, k)).toMatchObject({ enumerable: false, writable: true, configurable: true });
+    }
+    expect(thrown.failureTrail).toHaveLength(1);
+    expect(thrown.failureMember).toEqual({ provider: 'openai', model: 'gpt-x' });
+  });
+});
