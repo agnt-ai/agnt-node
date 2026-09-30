@@ -76,6 +76,9 @@ export type {
   ToolHandler,
   ToolCallCallback,
   ExecutionResult,
+  ExecutorFailure,
+  ExecutorFailureKind,
+  FallbackTrailEntry,
   Usage,
   Message,
   ToolCall,
@@ -86,3 +89,4 @@ export type {
   ModelPricing,
   AgntConfig
 } from './types.js';
+export { classifyError, buildFailure } from './failure.js';
