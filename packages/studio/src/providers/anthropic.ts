@@ -211,7 +211,13 @@ export default class AnthropicExecutor extends BaseExecutor {
     const usageTyped = response.usage as typeof response.usage & {
       cache_read_input_tokens?: number;
       cache_creation_input_tokens?: number;
+      output_tokens_details?: { thinking_tokens?: number };
     };
+    // Anthropic reports thinking tokens as a detail within the inclusive output
+    // total. Carry it as an optional observation, never as an extra billable
+    // bucket: output_tokens remains the authoritative total for cost and trace
+    // accounting. The API can omit the detail, while an explicit zero is valid.
+    const thinkingTokens = usageTyped.output_tokens_details?.thinking_tokens;
     // Preserve thinking blocks verbatim so they can be echoed back unchanged on
     // the next same-model turn — Anthropic requires this during tool use with
     // thinking on, or the following request 400s. Kept in `rawParts` (the same
@@ -236,7 +242,8 @@ export default class AnthropicExecutor extends BaseExecutor {
         input_tokens: response.usage.input_tokens,
         output_tokens: response.usage.output_tokens,
         cache_read_input_tokens: usageTyped.cache_read_input_tokens ?? 0,
-        cache_creation_input_tokens: usageTyped.cache_creation_input_tokens ?? 0
+        cache_creation_input_tokens: usageTyped.cache_creation_input_tokens ?? 0,
+        ...(typeof thinkingTokens === 'number' ? { reasoning_output_tokens: thinkingTokens } : {})
       }
     };
   }
