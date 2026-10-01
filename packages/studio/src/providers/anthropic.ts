@@ -22,12 +22,19 @@ import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
  */
 const ANTHROPIC_REASONING_FAMILY = /^claude-(opus-5|opus-4-8|opus-4-7|sonnet-5|fable-5|mythos-5)(-|$)/i;
 
-/** Legacy sampling knobs the reasoning family rejects (400) alongside adaptive thinking. */
 /** Family members that think adaptively even when the request sets no `thinking`
  * (Opus 5.x, Sonnet 5.x, Fable, Mythos) — so tool_choice:'tool' 400s on them
  * without any effort being configured. Opus 4.7/4.8 stay off until asked. */
 const ANTHROPIC_ALWAYS_THINKING = /^claude-(opus-5|sonnet-5|fable-5|mythos-5)(-|$)/i;
 
+/** Models that reject ANY forced tool use: `tool_choice` `any` or `tool` is a 400
+ * ("type "tool" and "any" are not supported for this model"), with or without
+ * thinking. Only `auto`/`none` are accepted. Opus 5.5 and Sonnet 5.5 (Opus 5 and
+ * Sonnet 5 still accept forcing). Verified 2026-10-01 against the Anthropic
+ * Opus 5.5 / Sonnet 5.5 migration guides. */
+const ANTHROPIC_NO_FORCED_TOOL_USE = /^claude-(opus-5-5|sonnet-5-5)(-|$)/i;
+
+/** Legacy sampling knobs the reasoning family rejects (400) alongside adaptive thinking. */
 const ANTHROPIC_REASONING_UNSUPPORTED_PARAMS = ['temperature', 'top_p', 'top_k', 'budget_tokens'];
 
 /**
@@ -189,6 +196,12 @@ export default class AnthropicExecutor extends BaseExecutor {
     // Downgrade to 'any' — still forces a tool call, compatible with thinking.
     if ((params.thinking || ANTHROPIC_ALWAYS_THINKING.test(this.model || '')) && params.tool_choice?.type === 'tool') {
       params.tool_choice = { type: 'any' };
+    }
+    // Opus 5.5 / Sonnet 5.5 reject `any` as well, so forcing is not possible at all:
+    // fall back to the default (`auto`) rather than send a request that always 400s.
+    if (ANTHROPIC_NO_FORCED_TOOL_USE.test(this.model || '') && (params.tool_choice?.type === 'any' || params.tool_choice?.type === 'tool')) {
+      this.log(`[AnthropicExecutor] forced tool_choice (${params.tool_choice.type}) dropped — ${this.model} does not support forced tool use`);
+      delete params.tool_choice;
     }
 
     // Call Anthropic API — STREAMED. `messages.stream()` accumulates text and
