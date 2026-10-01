@@ -106,6 +106,9 @@ export interface Usage {
   cacheCreationTokens: number;   // tokens written to cache (1.25× rate)
   cacheReadTokens: number;       // tokens read from cache (0.1× rate)
   outputTokens: number;
+  /** Provider-reported reasoning tokens, a subset of outputTokens. Absent when
+   *  the provider does not report the detail for every completed turn. */
+  reasoningTokens?: number;
   totalCostUSD: number;
 }
 
@@ -116,6 +119,8 @@ export interface InvokeResult {
     output_tokens: number;
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
+    /** Provider-reported detail; a subset of output_tokens, never an added bucket. */
+    reasoning_output_tokens?: number;
   };
   /** Why the provider stopped generating, verbatim from the wire — currently
    *  supplied only by Bedrock's Converse API (`response.stopReason`), which is

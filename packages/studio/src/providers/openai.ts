@@ -463,6 +463,7 @@ export default class OpenAIExecutor extends BaseExecutor {
     const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
     const inputTokens = usage.input_tokens ?? 0;
     const outputTokens = usage.output_tokens ?? 0;
+    const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
 
     return {
       message: {
@@ -475,6 +476,7 @@ export default class OpenAIExecutor extends BaseExecutor {
         output_tokens: outputTokens,
         cache_read_input_tokens: cachedTokens,
         cache_creation_input_tokens: 0,
+        ...(typeof reasoningTokens === 'number' ? { reasoning_output_tokens: reasoningTokens } : {}),
       },
     };
   }

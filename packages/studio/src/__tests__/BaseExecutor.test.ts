@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import BaseExecutor from '../BaseExecutor.js';
+import { HookRegistry } from '../hooks.js';
 import { StreamAbortError } from '../providers/streaming.js';
 import type { BaseExecutorConfig, PromptManifestV2 } from '../types.js';
 
@@ -85,6 +86,39 @@ class TestExecutor extends BaseExecutor {
     return this.getMissingRequiredKeys(name, args);
   }
 }
+
+describe('reasoning-token usage', () => {
+  it('keeps reported reasoning tokens as an output detail in execution and llm_output hook payloads', async () => {
+    const hooks = new HookRegistry();
+    let tracePayload: Record<string, any> | undefined;
+    hooks.register('llm_output', async (payload) => {
+      tracePayload = payload;
+    });
+
+    const ex = new TestExecutor(makeConfig(makeManifest(), { hooks }));
+    ex.invoke.mockResolvedValue({
+      message: { role: 'assistant', content: 'ok' },
+      usage: {
+        input_tokens: 40,
+        output_tokens: 120,
+        reasoning_output_tokens: 80,
+      },
+    });
+
+    const result = await ex.execute();
+    expect(result.usage).toMatchObject({
+      inputTokens: 40,
+      outputTokens: 120,
+      reasoningTokens: 80,
+    });
+    expect(tracePayload).toMatchObject({
+      inputTokens: 40,
+      outputTokens: 120,
+      totalTokens: 160,
+      reasoningTokens: 80,
+    });
+  });
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // populateTemplate — component resolution
@@ -1785,4 +1819,3 @@ describe("invokeWithFallback — resets to the original primary at the start of 
     expect(ex.model).toBe('claude-opus-4-8');
   });
 });
-

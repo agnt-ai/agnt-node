@@ -198,14 +198,19 @@ describe('OpenAIExecutor reasoning-family routing (/v1/responses)', () => {
     expect(sent.parallel_tool_calls).toBe(true);
   });
 
-  it('maps Responses output (text + function_call) and usage back into InvokeResult', async () => {
+  it('maps Responses output (text + function_call) and reported reasoning usage back into InvokeResult', async () => {
     stubResponses({
       output: [
         { type: 'reasoning', summary: [] },
         { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'here you go' }] },
         { type: 'function_call', call_id: 'call_9', name: 'book', arguments: '{"when":"noon"}' },
       ],
-      usage: { input_tokens: 100, output_tokens: 20, input_tokens_details: { cached_tokens: 30 } },
+      usage: {
+        input_tokens: 100,
+        output_tokens: 120,
+        input_tokens_details: { cached_tokens: 30 },
+        output_tokens_details: { reasoning_tokens: 80 },
+      },
     });
     const ex = new OpenAIExecutor(makeConfig('openai', 'gpt-5.6', {}));
     const res = await ex.invoke([{ role: 'user', content: 'book noon' }]);
@@ -215,10 +220,29 @@ describe('OpenAIExecutor reasoning-family routing (/v1/responses)', () => {
     // input_tokens is UNCACHED (100 - 30); cached tokens land in cache_read.
     expect(res.usage).toEqual({
       input_tokens: 70,
-      output_tokens: 20,
+      output_tokens: 120,
       cache_read_input_tokens: 30,
       cache_creation_input_tokens: 0,
+      reasoning_output_tokens: 80,
     });
+  });
+
+  it('leaves missing reasoning usage unknown and preserves an explicit zero', async () => {
+    stubResponses({ usage: { input_tokens: 12, output_tokens: 5 } });
+    const ex = new OpenAIExecutor(makeConfig('openai', 'gpt-5.6', {}));
+    const missing = await ex.invoke([{ role: 'user', content: 'hi' }]);
+    expect(missing.usage).not.toHaveProperty('reasoning_output_tokens');
+
+    vi.clearAllMocks();
+    stubResponses({
+      usage: {
+        input_tokens: 12,
+        output_tokens: 5,
+        output_tokens_details: { reasoning_tokens: 0 },
+      },
+    });
+    const zero = await ex.invoke([{ role: 'user', content: 'hi' }]);
+    expect(zero.usage?.reasoning_output_tokens).toBe(0);
   });
 
   it('translates a `file` content block to input_file on the Responses path', async () => {
