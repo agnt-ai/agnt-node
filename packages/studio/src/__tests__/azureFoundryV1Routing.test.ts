@@ -84,6 +84,21 @@ describe('AzureFoundryExecutor — reasoning-family routing (v1 mode only)', () 
     expect(sent.reasoning).toEqual({ effort: 'medium' });
   });
 
+  it('routes gpt-6-sol / gpt-6.1-sol / gpt-6-luna deployments to responses.create, dropping temperature', async () => {
+    for (const model of ['gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-luna']) {
+      stubResponses();
+      const ex = new AzureFoundryExecutor(makeConfig(V1_ENDPOINT, model, { reasoning_effort: 'high', temperature: 1 }));
+      await ex.invoke([{ role: 'user', content: 'hi' }] as any);
+
+      expect(azureResponsesCreate).toHaveBeenCalledTimes(1);
+      expect(azureChatCreate).not.toHaveBeenCalled();
+      const sent = azureResponsesCreate.mock.calls[0][0];
+      expect(sent.reasoning).toEqual({ effort: 'high' });
+      expect(sent.temperature).toBeUndefined();
+      vi.clearAllMocks();
+    }
+  });
+
   it('keeps a reasoning-family model on Chat Completions when NOT in v1 mode (Model Inference API has no /responses)', async () => {
     stubChat();
     const ex = new AzureFoundryExecutor(makeConfig('https://res.services.ai.azure.com/api/projects/foo', 'gpt-5.6-luna'));
