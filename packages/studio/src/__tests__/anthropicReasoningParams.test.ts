@@ -21,6 +21,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
 }));
 
 import AnthropicExecutor from '../providers/anthropic.js';
+import { HookRegistry } from '../hooks.js';
 import type { BaseExecutorConfig, PromptManifestV2 } from '../types.js';
 
 function makeManifest(model: string, metadata: Record<string, any>): PromptManifestV2 {
@@ -43,9 +44,12 @@ function config(model: string, metadata: Record<string, any>): BaseExecutorConfi
   } as BaseExecutorConfig;
 }
 
-function stub(content: any[] = [{ type: 'text', text: 'hi' }]) {
+function stub(
+  content: any[] = [{ type: 'text', text: 'hi' }],
+  usage: Record<string, any> = { input_tokens: 10, output_tokens: 5 },
+) {
   anthropicStream.mockReturnValue(
-    anthropicMessageStream({ content, usage: { input_tokens: 10, output_tokens: 5 } })
+    anthropicMessageStream({ content, usage })
   );
 }
 
@@ -54,6 +58,50 @@ beforeEach(() => {
 });
 
 describe('AnthropicExecutor reasoning (opt-in)', () => {
+  it('carries reported thinking tokens to normalized usage and the llm_output hook without changing inclusive totals', async () => {
+    const hooks = new HookRegistry();
+    let tracePayload: Record<string, any> | undefined;
+    hooks.register('llm_output', async (payload) => {
+      tracePayload = payload;
+    });
+    stub(undefined, {
+      input_tokens: 40,
+      output_tokens: 120,
+      output_tokens_details: { thinking_tokens: 80 },
+    });
+    const ex = new AnthropicExecutor({ ...config('claude-opus-4-8', { reasoning_effort: 'high' }), hooks });
+
+    const result = await ex.execute();
+
+    expect(result.usage).toMatchObject({
+      inputTokens: 40,
+      outputTokens: 120,
+      reasoningTokens: 80,
+    });
+    expect(tracePayload).toMatchObject({
+      inputTokens: 40,
+      outputTokens: 120,
+      totalTokens: 160,
+      reasoningTokens: 80,
+    });
+  });
+
+  it('leaves missing thinking usage unknown and preserves an explicit zero', async () => {
+    stub();
+    const ex = new AnthropicExecutor(config('claude-opus-4-8', { reasoning_effort: 'high' }));
+    const missing = await ex.invoke([{ role: 'user', content: 'hi' }]);
+    expect(missing.usage).not.toHaveProperty('reasoning_output_tokens');
+
+    vi.clearAllMocks();
+    stub(undefined, {
+      input_tokens: 12,
+      output_tokens: 5,
+      output_tokens_details: { thinking_tokens: 0 },
+    });
+    const zero = await ex.invoke([{ role: 'user', content: 'hi' }]);
+    expect(zero.usage?.reasoning_output_tokens).toBe(0);
+  });
+
   it('maps reasoning_effort -> output_config.effort + adaptive thinking for the reasoning family', async () => {
     stub();
     const ex = new AnthropicExecutor(config('claude-opus-4-8', { reasoning_effort: 'high', temperature: 0.7, top_p: 0.9 }));
