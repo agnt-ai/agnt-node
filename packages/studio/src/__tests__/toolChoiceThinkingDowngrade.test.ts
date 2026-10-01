@@ -92,3 +92,18 @@ describe('AnthropicExecutor tool_choice downgrade when thinking is active', () =
     expect(sent.tool_choice).toEqual({ type: 'any' });
   });
 });
+
+describe('always-thinking models downgrade forced tool_choice without an effort set', () => {
+  it('claude-opus-5-5 / claude-sonnet-5-5 send tool_choice any, not a named tool', async () => {
+    for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5']) {
+      stub();
+      const ex = new AnthropicExecutor(config(model, {}));
+      await ex.invoke([{ role: 'user', content: 'hi' }], {
+        tools: [{ name: 'finish', description: 'd', parameters: { type: 'object', properties: {} } }] as any,
+        tool_choice: { type: 'tool', name: 'finish' } as any,
+      });
+      expect(anthropicStream.mock.calls[0][0].tool_choice).toEqual({ type: 'any' });
+      vi.clearAllMocks();
+    }
+  });
+});

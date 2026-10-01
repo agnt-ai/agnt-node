@@ -201,3 +201,39 @@ describe('AnthropicExecutor reasoning (opt-in)', () => {
     expect(thinkIdx).toBeLessThan(toolIdx);
   });
 });
+
+describe('AnthropicExecutor Opus 5.5 / Sonnet 5.5', () => {
+  it('maps effort + adaptive thinking and strips sampling knobs', async () => {
+    for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-opus-5']) {
+      stub();
+      const ex = new AnthropicExecutor(config(model, { reasoning_effort: 'high', temperature: 1, top_p: 0.9, top_k: 40 }));
+      await ex.invoke([{ role: 'user', content: 'hi' }]);
+      const sent = anthropicStream.mock.calls[0][0];
+      expect(sent.thinking).toEqual({ type: 'adaptive' });
+      expect(sent.output_config).toEqual({ effort: 'high' });
+      expect(sent.temperature).toBeUndefined();
+      expect(sent.top_p).toBeUndefined();
+      expect(sent.top_k).toBeUndefined();
+      vi.clearAllMocks();
+    }
+  });
+
+  it('strips sampling knobs even when no effort is set (they 400 on the family regardless)', async () => {
+    for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5']) {
+      stub();
+      const ex = new AnthropicExecutor(config(model, { temperature: 1 }));
+      await ex.invoke([{ role: 'user', content: 'hi' }]);
+      const sent = anthropicStream.mock.calls[0][0];
+      expect(sent.temperature).toBeUndefined();
+      expect(sent.thinking).toBeUndefined();
+      vi.clearAllMocks();
+    }
+  });
+
+  it('still lets Haiku 4.5 keep temperature', async () => {
+    stub();
+    const ex = new AnthropicExecutor(config('claude-haiku-4-5-20251001', { temperature: 0.3 }));
+    await ex.invoke([{ role: 'user', content: 'hi' }]);
+    expect(anthropicStream.mock.calls[0][0].temperature).toBe(0.3);
+  });
+});
