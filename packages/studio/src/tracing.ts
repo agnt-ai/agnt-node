@@ -18,6 +18,8 @@ export interface TracePayload {
   totalTokens: number;
   cacheCreationTokens?: number;
   cacheReadTokens?: number;
+  /** Provider-reported reasoning detail; a subset of outputTokens. */
+  reasoningTokens?: number;
   cost: number;
   duration: number;
   model: {

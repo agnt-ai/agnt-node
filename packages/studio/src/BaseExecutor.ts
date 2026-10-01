@@ -830,6 +830,9 @@ export default class BaseExecutor {
         cacheCreationTokens:  result.usage?.cache_creation_input_tokens || 0,
         cacheReadTokens:      result.usage?.cache_read_input_tokens     || 0,
         outputTokens:         result.usage?.output_tokens               || 0,
+        ...(result.usage?.reasoning_output_tokens !== undefined
+          ? { reasoningTokens: result.usage.reasoning_output_tokens }
+          : {}),
         totalCostUSD:         0,
       };
       usage.totalCostUSD = this.calculateCost(result.usage ?? 0, usage.outputTokens);
@@ -979,6 +982,14 @@ export default class BaseExecutor {
       usage.cacheCreationTokens += result.usage?.cache_creation_input_tokens || 0;
       usage.cacheReadTokens     += result.usage?.cache_read_input_tokens     || 0;
       usage.outputTokens        += result.usage?.output_tokens               || 0;
+      const turnReasoningTokens = result.usage?.reasoning_output_tokens;
+      // A run-level total is only known when every completed turn reported this
+      // optional provider detail. Never turn a partially reported sum into fact.
+      if (usage.reasoningTokens !== undefined && turnReasoningTokens !== undefined) {
+        usage.reasoningTokens += turnReasoningTokens;
+      } else if (turnReasoningTokens === undefined) {
+        usage.reasoningTokens = undefined;
+      }
       // Recalculate with per-type breakdown so cache rates are applied correctly
       usage.totalCostUSD = this.calculateCost({
         input_tokens:                usage.inputTokens - usage.cacheCreationTokens - usage.cacheReadTokens,
@@ -1444,7 +1455,7 @@ export default class BaseExecutor {
   // ─────────────────────────────────────────────────────────────────────────────
 
   protected async sendTurnTrace(
-    turnUsage: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } | null | undefined,
+    turnUsage: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; reasoning_output_tokens?: number } | null | undefined,
     turnDuration: number,
     cost: number
   ): Promise<void> {
@@ -1472,6 +1483,9 @@ export default class BaseExecutor {
       // Cache breakdown for observability
       cacheCreationTokens: turnUsage?.cache_creation_input_tokens || 0,
       cacheReadTokens:     turnUsage?.cache_read_input_tokens     || 0,
+      ...(turnUsage?.reasoning_output_tokens !== undefined
+        ? { reasoningTokens: turnUsage.reasoning_output_tokens }
+        : {}),
       cost,
       duration: turnDuration,
       model: { provider: this.provider, name: this.model, metadata: this.primaryModelConfig.metadata || {} },
