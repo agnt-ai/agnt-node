@@ -22,10 +22,11 @@ import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
  */
 const ANTHROPIC_REASONING_FAMILY = /^claude-(opus-5|opus-4-8|opus-4-7|sonnet-5|fable-5|mythos-5)(-|$)/i;
 
-/** Family members that think adaptively even when the request sets no `thinking`
- * (Opus 5.x, Sonnet 5.x, Fable, Mythos) — so tool_choice:'tool' 400s on them
- * without any effort being configured. Opus 4.7/4.8 stay off until asked. */
-const ANTHROPIC_ALWAYS_THINKING = /^claude-(opus-5|sonnet-5|fable-5|mythos-5)(-|$)/i;
+/** The 5.5 models (Opus 5.5 always thinks; Sonnet 5.5 thinks by default) — they run
+ * adaptive thinking even when the request sets no `thinking`, so a named
+ * tool_choice 400s on them with no effort configured. Deliberately NOT the older
+ * Opus 5 / Sonnet 5 / Fable / Mythos: their no-effort behavior is left as it was. */
+const ANTHROPIC_ALWAYS_THINKING = /^claude-(opus-5-5|sonnet-5-5)(-|$)/i;
 
 /** Models that reject ANY forced tool use: `tool_choice` `any` or `tool` is a 400
  * ("type "tool" and "any" are not supported for this model"), with or without
@@ -597,10 +598,9 @@ export default class AnthropicExecutor extends BaseExecutor {
     const effort = params.reasoning_effort;
     delete params.reasoning_effort;
 
-    // The always-thinking models (Opus 5.x, Sonnet 5.x, Fable, Mythos) 400 on
-    // sampling knobs whether or not an effort is set, so strip them even on the
-    // no-effort path. Opus 4.7/4.8 only think when asked, so they keep the
-    // unchanged no-op below.
+    // Opus 5.5 / Sonnet 5.5 400 on sampling knobs whether or not an effort is
+    // set, so strip them even on the no-effort path. Every other family member
+    // keeps the unchanged no-op below when no effort is given.
     const inFamily = ANTHROPIC_REASONING_FAMILY.test(this.model || '');
     if (inFamily && (effort || ANTHROPIC_ALWAYS_THINKING.test(this.model || ''))) {
       for (const key of ANTHROPIC_REASONING_UNSUPPORTED_PARAMS) {

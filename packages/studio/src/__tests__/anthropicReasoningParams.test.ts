@@ -230,6 +230,16 @@ describe('AnthropicExecutor Opus 5.5 / Sonnet 5.5', () => {
     }
   });
 
+  it('leaves existing Sonnet 5 / Fable 5 / Opus 5 sampling params alone when no effort is set', async () => {
+    for (const model of ['claude-sonnet-5', 'claude-fable-5-1', 'claude-opus-5']) {
+      stub();
+      const ex = new AnthropicExecutor(config(model, { temperature: 0.4 }));
+      await ex.invoke([{ role: 'user', content: 'hi' }]);
+      expect(anthropicStream.mock.calls[0][0].temperature).toBe(0.4);
+      vi.clearAllMocks();
+    }
+  });
+
   it('still lets Haiku 4.5 keep temperature', async () => {
     stub();
     const ex = new AnthropicExecutor(config('claude-haiku-4-5-20251001', { temperature: 0.3 }));
