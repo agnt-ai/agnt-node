@@ -92,3 +92,29 @@ describe('AnthropicExecutor tool_choice downgrade when thinking is active', () =
     expect(sent.tool_choice).toEqual({ type: 'any' });
   });
 });
+
+const tools = [{ name: 'finish', description: 'd', parameters: { type: 'object', properties: {} } }] as any;
+
+describe('Opus 5.5 / Sonnet 5.5 reject forced tool use entirely', () => {
+  it('drops tool_choice tool/any (sent as auto) instead of 400ing', async () => {
+    for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5']) {
+      for (const tool_choice of [{ type: 'tool', name: 'finish' }, { type: 'any' }]) {
+        stub();
+        const ex = new AnthropicExecutor(config(model, {}));
+        await ex.invoke([{ role: 'user', content: 'hi' }], { tools, tool_choice: tool_choice as any });
+        expect(anthropicStream.mock.calls[0][0].tool_choice).toBeUndefined();
+        vi.clearAllMocks();
+      }
+    }
+  });
+
+  it('leaves Sonnet 5 / Opus 5 / Fable 5 forced tool_choice untouched when no effort is set', async () => {
+    for (const model of ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1']) {
+      stub();
+      const ex = new AnthropicExecutor(config(model, {}));
+      await ex.invoke([{ role: 'user', content: 'hi' }], { tools, tool_choice: { type: 'tool', name: 'finish' } as any });
+      expect(anthropicStream.mock.calls[0][0].tool_choice).toEqual({ type: 'tool', name: 'finish' });
+      vi.clearAllMocks();
+    }
+  });
+});

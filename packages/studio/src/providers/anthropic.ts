@@ -20,7 +20,20 @@ import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
  * use `budget_tokens`, still accept sampling params, and reject `effort`.
  * Confirmed against the claude-api reference (2026-07-21).
  */
-const ANTHROPIC_REASONING_FAMILY = /^claude-(opus-4-8|opus-4-7|sonnet-5|fable-5|mythos-5)(-|$)/i;
+const ANTHROPIC_REASONING_FAMILY = /^claude-(opus-5|opus-4-8|opus-4-7|sonnet-5|fable-5|mythos-5)(-|$)/i;
+
+/** The 5.5 models (Opus 5.5 always thinks; Sonnet 5.5 thinks by default) — they run
+ * adaptive thinking even when the request sets no `thinking`, so a named
+ * tool_choice 400s on them with no effort configured. Deliberately NOT the older
+ * Opus 5 / Sonnet 5 / Fable / Mythos: their no-effort behavior is left as it was. */
+const ANTHROPIC_ALWAYS_THINKING = /^claude-(opus-5-5|sonnet-5-5)(-|$)/i;
+
+/** Models that reject ANY forced tool use: `tool_choice` `any` or `tool` is a 400
+ * ("type "tool" and "any" are not supported for this model"), with or without
+ * thinking. Only `auto`/`none` are accepted. Opus 5.5 and Sonnet 5.5 (Opus 5 and
+ * Sonnet 5 still accept forcing). Verified 2026-10-01 against the Anthropic
+ * Opus 5.5 / Sonnet 5.5 migration guides. */
+const ANTHROPIC_NO_FORCED_TOOL_USE = /^claude-(opus-5-5|sonnet-5-5)(-|$)/i;
 
 /** Legacy sampling knobs the reasoning family rejects (400) alongside adaptive thinking. */
 const ANTHROPIC_REASONING_UNSUPPORTED_PARAMS = ['temperature', 'top_p', 'top_k', 'budget_tokens'];
@@ -182,8 +195,14 @@ export default class AnthropicExecutor extends BaseExecutor {
     }
     // Anthropic rejects tool_choice:{type:'tool'} ('specified') when thinking is active.
     // Downgrade to 'any' — still forces a tool call, compatible with thinking.
-    if (params.thinking && params.tool_choice?.type === 'tool') {
+    if ((params.thinking || ANTHROPIC_ALWAYS_THINKING.test(this.model || '')) && params.tool_choice?.type === 'tool') {
       params.tool_choice = { type: 'any' };
+    }
+    // Opus 5.5 / Sonnet 5.5 reject `any` as well, so forcing is not possible at all:
+    // fall back to the default (`auto`) rather than send a request that always 400s.
+    if (ANTHROPIC_NO_FORCED_TOOL_USE.test(this.model || '') && (params.tool_choice?.type === 'any' || params.tool_choice?.type === 'tool')) {
+      this.log(`[AnthropicExecutor] forced tool_choice (${params.tool_choice.type}) dropped — ${this.model} does not support forced tool use`);
+      delete params.tool_choice;
     }
 
     // Call Anthropic API — STREAMED. `messages.stream()` accumulates text and
@@ -586,14 +605,21 @@ export default class AnthropicExecutor extends BaseExecutor {
     const effort = params.reasoning_effort;
     delete params.reasoning_effort;
 
-    if (!effort) return;
-
-    if (ANTHROPIC_REASONING_FAMILY.test(this.model || '')) {
-      params.thinking = { type: 'adaptive' };
-      params.output_config = { ...(params.output_config || {}), effort };
+    // Opus 5.5 / Sonnet 5.5 400 on sampling knobs whether or not an effort is
+    // set, so strip them even on the no-effort path. Every other family member
+    // keeps the unchanged no-op below when no effort is given.
+    const inFamily = ANTHROPIC_REASONING_FAMILY.test(this.model || '');
+    if (inFamily && (effort || ANTHROPIC_ALWAYS_THINKING.test(this.model || ''))) {
       for (const key of ANTHROPIC_REASONING_UNSUPPORTED_PARAMS) {
         delete params[key];
       }
+    }
+
+    if (!effort) return;
+
+    if (inFamily) {
+      params.thinking = { type: 'adaptive' };
+      params.output_config = { ...(params.output_config || {}), effort };
       return;
     }
 
