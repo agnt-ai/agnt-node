@@ -6,9 +6,9 @@
 
 import { GoogleGenerativeAI, Content, Part, FunctionDeclaration, Tool } from '@google/generative-ai';
 import BaseExecutor from '../BaseExecutor.js';
-import { nativeItems, legacyParts, requestReasoningConfig } from './nativeState.js';
+import { nativeItems, legacyParts, requestReasoningConfig, GEMINI_IMPORTED_HISTORY_SIGNATURE } from './nativeState.js';
 import { geminiThinkingConfig } from './geminiThinking.js';
-import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
+import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult, InputTransformation } from '../types.js';
 import { fileToGeminiPart } from './fileAttachment.js';
 import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
 
@@ -52,7 +52,7 @@ export default class GoogleExecutor extends BaseExecutor {
     const providerParams = this.#extractProviderParams();
 
     // Format messages for Gemini (separate system from conversation)
-    const { systemInstruction, contents } = this.#formatMessages(messages);
+    const { systemInstruction, contents, inputTransformations } = this.#formatMessages(messages);
 
     // Build model config
     const modelConfig: any = {
@@ -172,6 +172,7 @@ export default class GoogleExecutor extends BaseExecutor {
     // aggregated candidate parts only if the stream yielded none.
     return {
       reasoningConfig: requestReasoningConfig(this.provider, this.model, modelConfig),
+      ...(inputTransformations.length ? { inputTransformations } : {}),
       message: {
         role: 'assistant',
         content: textContent,
@@ -196,11 +197,12 @@ export default class GoogleExecutor extends BaseExecutor {
    * Gemini expects: systemInstruction (string) + contents (Content[])
    * Content = { role: 'user' | 'model', parts: Part[] }
    */
-  #formatMessages(messages: Message[]): { systemInstruction?: string; contents: Content[] } {
+  #formatMessages(messages: Message[]): { systemInstruction?: string; contents: Content[]; inputTransformations: InputTransformation[] } {
     const systemMessages = messages.filter(m => m.role === 'system');
     const systemInstruction = systemMessages.map(m => m.content).join('\n\n');
 
     const contents: Content[] = [];
+    const inputTransformations: InputTransformation[] = [];
 
     for (const msg of messages) {
       // Skip system messages (handled separately)
@@ -241,6 +243,9 @@ export default class GoogleExecutor extends BaseExecutor {
 
       const replay = nativeItems(msg, this.provider, this.model, 'gemini-parts') ?? legacyParts(msg, 'gemini-parts');
       if (msg.role === 'assistant' && replay) {
+        replay.forEach((part, index) => {
+          if (part.thoughtSignature === GEMINI_IMPORTED_HISTORY_SIGNATURE) inputTransformations.push({ type: 'imported_history', path: `contents.${contents.length}.parts.${index}`, reason: 'canonical_tool_history_changed' });
+        });
         contents.push({ role: 'model', parts: replay });
         continue;
       }
@@ -289,7 +294,8 @@ export default class GoogleExecutor extends BaseExecutor {
 
     return {
       systemInstruction: systemInstruction || undefined,
-      contents
+      contents,
+      inputTransformations
     };
   }
 
@@ -483,7 +489,7 @@ export default class GoogleExecutor extends BaseExecutor {
         toolCalls.push({
           id: part.functionCall.name, // Use function name as ID since Google doesn't provide IDs
           name: part.functionCall.name,
-          args: part.functionCall.args || {}
+          args: structuredClone(part.functionCall.args || {})
         });
       }
     }

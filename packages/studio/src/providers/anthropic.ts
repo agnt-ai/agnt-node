@@ -576,7 +576,7 @@ export default class AnthropicExecutor extends BaseExecutor {
     return toolUseBlocks.map(block => ({
       id: block.id,
       name: block.name,
-      args: block.input
+      args: structuredClone(block.input)
     }));
   }
 
@@ -651,9 +651,18 @@ export default class AnthropicExecutor extends BaseExecutor {
 
     if (!effort) return;
 
+    // Explicit native mode/budget is authoritative. Display and binding alone
+    // still allow the generic effort mapping to fill the mode.
+    if (params.thinking?.type != null || params.thinking?.budget_tokens != null) {
+      if (inFamily && params.thinking?.type === 'adaptive' && params.output_config?.effort == null) {
+        params.output_config = { ...(params.output_config || {}), effort };
+      }
+      return;
+    }
+
     if (inFamily) {
       params.thinking = { ...(params.thinking?.display ? { display: params.thinking.display } : {}), ...(params.thinking?.block_binding ? { block_binding: params.thinking.block_binding } : {}), type: 'adaptive' };
-      params.output_config = { ...(params.output_config || {}), effort };
+      params.output_config = { effort, ...(params.output_config || {}) };
       return;
     }
 

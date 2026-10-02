@@ -102,7 +102,7 @@ describe('Anthropic continuity', () => {
   it('preserves full block order and thinking display under adaptive mapping', async () => {
     const blocks = [{ type: 'thinking', thinking: 'Public summary', signature: 'opaque-signature' }, { type: 'tool_use', id: 'call_1', name: 'weather', input: {} }, { type: 'text', text: 'Checking.' }];
     anthropicStream.mockImplementation(() => anthropicMessageStream({ role: 'assistant', content: blocks, usage: { input_tokens: 1, output_tokens: 10 } }));
-    const ex = new AnthropicExecutor(config('anthropic', 'claude-sonnet-5', { reasoning_effort: 'high', thinking: { type: 'enabled', budget_tokens: 4096, display: 'summarized' } }));
+    const ex = new AnthropicExecutor(config('anthropic', 'claude-sonnet-5', { reasoning_effort: 'high', thinking: { display: 'summarized' } }));
     const first = await ex.invoke([{ role: 'user', content: 'hi' }]);
     expect(first.message.reasoningSummary).toEqual([{ type: 'summary_text', text: 'Public summary' }]);
     await ex.invoke([first.message, { role: 'tool', tool_call_id: 'call_1', content: 'ok' }]);
@@ -234,4 +234,120 @@ it('counts exposed reasoning/signature parts separately from envelope presence',
   expect(nativeStatePresence(message).observedReasoningParts).toBe(2);
   message.nativeState = { provider: 'google', model: 'gemini-3-flash-preview', format: 'gemini-parts', items: [{ text: 'summary', thought: true }, { text: 'plain', thoughtSignature: 'opaque' }] };
   expect(nativeStatePresence(message).observedReasoningParts).toBe(2);
+});
+describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureExecutor]] as const)('%s canonical history reconciliation', (provider, Executor) => {
+  it('honors repaired oversized IDs, removes orphan calls, adds a canonical call once, preserves opaque state without mutating storage', async () => {
+    const longId = 'call_' + 'x'.repeat(90);
+    const native = [{ ...output[0] }, { ...output[1] }, { ...output[2], call_id: longId }, { ...output[3] }];
+    responsesCreate.mockImplementation(async () => openAIResponsesStreamFromResponse({ status: 'completed', output: native, usage: { input_tokens: 1, output_tokens: 1 } }));
+    const ex = new Executor(config(provider, 'gpt-5.6'));
+    const first = await ex.invoke([{ role: 'user', content: 'go' }]);
+    const unchangedState = JSON.stringify(first.message.nativeState);
+    const repairedId = 'call_repaired_id_at_most_64';
+    first.message.tool_calls = [{ ...first.message.tool_calls![0], id: repairedId }, { id: 'call_added', name: 'finish', args: { done: true } }];
+    first.message.content = 'Shortened commentary.';
+    await ex.invoke([first.message, { role: 'tool', tool_call_id: repairedId, content: 'ok' }, { role: 'tool', tool_call_id: 'call_added', content: 'done' }]);
+    const input = responsesCreate.mock.lastCall![0].input;
+    expect(input[0]).toEqual(native[0]);
+    expect(input.find((item: any) => item.type === 'message')).toMatchObject({ id: 'msg_1', phase: 'commentary', content: [{ type: 'output_text', text: 'Shortened commentary.' }] });
+    expect(input.filter((item: any) => item.type === 'function_call').map((item: any) => item.call_id)).toEqual([repairedId, 'call_added']);
+    expect(input.filter((item: any) => item.type === 'function_call_output').map((item: any) => item.call_id)).toEqual([repairedId, 'call_added']);
+    expect(JSON.stringify(first.message.nativeState)).toBe(unchangedState);
+    first.message.content = [{ type: 'text', text: 'Revised text parts.' }];
+    await ex.invoke([first.message]);
+    expect(responsesCreate.mock.lastCall![0].input.find((item: any) => item.type === 'message').content[0].text).toBe('Revised text parts.');
+  });
+  it('preclaims exact IDs when one of two identical calls is removed', async () => {
+    const native = [output[0], { ...output[2], id: 'fc_a', call_id: 'call_a', arguments: ' { "x" : 1 } ' }, { ...output[2], id: 'fc_b', call_id: 'call_b', arguments: ' { "x" : 1 } ' }];
+    responsesCreate.mockImplementation(async () => openAIResponsesStreamFromResponse({ status: 'completed', output: native }));
+    const ex = new Executor(config(provider, 'gpt-5.6')); const first = await ex.invoke([{ role: 'user', content: 'go' }]);
+    first.message.tool_calls = [first.message.tool_calls![1]];
+    await ex.invoke([first.message, { role: 'tool', tool_call_id: 'call_b', content: 'ok' }]);
+    expect(responsesCreate.mock.lastCall![0].input.slice(0, 2)).toEqual([native[0], native[2]]);
+    first.message.tool_calls = [];
+    await ex.invoke([first.message]);
+    expect(responsesCreate.mock.lastCall![0].input).toEqual([native[0]]);
+  });
+  it('preserves all unedited message phases/content/JSON whitespace across multiple native messages', async () => {
+    const native = [output[0], output[1], { ...output[2], arguments: ' { "city" : "NYC" } ' }, { ...output[1], id: 'msg_2', phase: 'final_answer', content: [{ type: 'output_text', text: 'Done.', annotations: [] }] }];
+    responsesCreate.mockImplementation(async () => openAIResponsesStreamFromResponse({ status: 'completed', output: native }));
+    const ex = new Executor(config(provider, 'gpt-5.6')); const first = await ex.invoke([{ role: 'user', content: 'go' }]);
+    await ex.invoke([first.message]);
+    expect(responsesCreate.mock.lastCall![0].input).toEqual(native);
+  });
+});
+describe('Anthropic explicit native precedence and canonical history', () => {
+  it.each([
+    { thinking: { type: 'disabled' }, output_config: { effort: 'low' } },
+    { thinking: { type: 'adaptive', display: 'summarized' }, output_config: { effort: 'low' } },
+  ])('preserves explicit native settings over generic high', async native => {
+    anthropicStream.mockImplementation(() => anthropicMessageStream({ content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } }));
+    await new AnthropicExecutor(config('anthropic', 'claude-sonnet-5', { reasoning_effort: 'high', ...native })).invoke([{ role: 'user', content: 'go' }]);
+    expect(anthropicStream.mock.lastCall![0].thinking).toEqual(native.thinking);
+    expect(anthropicStream.mock.lastCall![0].output_config).toEqual(native.output_config);
+  });
+  it('preserves an explicit manual budget and display over generic high', async () => {
+    anthropicStream.mockImplementation(() => anthropicMessageStream({ content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } }));
+    const thinking = { type: 'enabled', budget_tokens: 2048, display: 'summarized' };
+    await new AnthropicExecutor(config('anthropic', 'claude-haiku-4-5', { max_tokens: 16000, reasoning_effort: 'high', thinking })).invoke([{ role: 'user', content: 'go' }]);
+    expect(anthropicStream.mock.lastCall![0].thinking).toEqual(thinking);
+    expect(anthropicStream.mock.lastCall![0].reasoning_effort).toBeUndefined();
+  });
+  it('preserves a native output effort while generic effort fills adaptive mode alongside display/binding', async () => {
+    anthropicStream.mockImplementation(() => anthropicMessageStream({ content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1, output_tokens: 1 } }));
+    await new AnthropicExecutor(config('anthropic', 'claude-sonnet-5', { reasoning_effort: 'high', output_config: { effort: 'low' }, thinking: { display: 'summarized', block_binding: { prefix_mismatch_behavior: 'error' } } })).invoke([{ role: 'user', content: 'go' }]);
+    expect(anthropicStream.mock.lastCall![0].thinking).toEqual({ type: 'adaptive', display: 'summarized', block_binding: { prefix_mismatch_behavior: 'error' } });
+    expect(anthropicStream.mock.lastCall![0].output_config).toEqual({ effort: 'low' });
+  });
+  it('keeps unedited multiline blocks exact and repairs canonical tool IDs without mutating opaque blocks', async () => {
+    const native = [{ type: 'thinking', thinking: 'summary', signature: 'opaque-sig' }, { type: 'text', text: ' line one ' }, { type: 'tool_use', id: 'original-id', name: 'weather', input: {} }, { type: 'text', text: 'line two' }];
+    anthropicStream.mockImplementation(() => anthropicMessageStream({ content: native, usage: { input_tokens: 1, output_tokens: 1 } }));
+    const ex = new AnthropicExecutor(config('anthropic', 'claude-sonnet-5')); const first = await ex.invoke([{ role: 'user', content: 'go' }], { disableCache: true });
+    const snapshot = JSON.stringify(first.message.nativeState);
+    await ex.invoke([first.message], { disableCache: true });
+    expect(anthropicStream.mock.lastCall![0].messages[0].content).toEqual(native);
+    first.message.tool_calls![0].id = 'repaired-id';
+    await ex.invoke([first.message, { role: 'tool', tool_call_id: 'repaired-id', content: 'ok' }], { disableCache: true });
+    expect(anthropicStream.mock.lastCall![0].messages[0].content).toEqual([native[0], native[1], { ...native[2], id: 'repaired-id' }, native[3]]);
+    expect(JSON.stringify(first.message.nativeState)).toBe(snapshot);
+  });
+});
+describe.each([false, true])('Gemini edited signed history (legacy rawParts=%s)', legacy => {
+  const parts = [
+    { functionCall: { name: 'weather', args: { city: 'Paris' } }, thoughtSignature: 'signature-for-Paris' },
+    { functionCall: { name: 'weather', args: { city: 'London' } } },
+  ];
+  async function firstTurn() {
+    gemini(parts, 10, true);
+    const ex = new GoogleExecutor(config('google', 'gemini-3-flash-preview'));
+    const first = await ex.invoke([{ role: 'user', content: 'go' }]);
+    if (legacy) delete first.message.nativeState;
+    return { ex, first };
+  }
+  it('preserves untouched parallel calls exactly without an import sentinel', async () => {
+    const { ex, first } = await firstTurn();
+    const result = await ex.invoke([first.message]);
+    expect(googleStream.mock.lastCall![0].contents[0].parts).toEqual(parts);
+    expect(result.inputTransformations).toBeUndefined();
+  });
+  it('imports a retained unsigned sibling after the first signed call is removed without moving its signature', async () => {
+    const { ex, first } = await firstTurn(); const snapshot = JSON.stringify(first.message.nativeState || first.message.rawParts);
+    first.message.tool_calls = [first.message.tool_calls![1]];
+    const result = await ex.invoke([first.message, { role: 'tool', tool_call_id: 'weather', content: '{"city":"London"}' }]);
+    expect(googleStream.mock.lastCall![0].contents[0].parts).toEqual([{ ...parts[1], thoughtSignature: 'skip_thought_signature_validator' }]);
+    expect(result.inputTransformations).toEqual([{ type: 'imported_history', path: 'contents.0.parts.0', reason: 'canonical_tool_history_changed' }]);
+    expect(JSON.stringify(first.message.nativeState || first.message.rawParts)).toBe(snapshot);
+  });
+  it('preserves the signed surviving call when only the unsigned sibling is removed', async () => {
+    const { ex, first } = await firstTurn(); first.message.tool_calls = [first.message.tool_calls![0]];
+    const result = await ex.invoke([first.message]);
+    expect(googleStream.mock.lastCall![0].contents[0].parts).toEqual([parts[0]]);
+    expect(result.inputTransformations).toBeUndefined();
+  });
+  it('uses an import sentinel for a changed signed call argument', async () => {
+    const { ex, first } = await firstTurn(); first.message.tool_calls![0].args.city = 'Rome';
+    const result = await ex.invoke([first.message]);
+    expect(googleStream.mock.lastCall![0].contents[0].parts).toEqual([{ functionCall: { name: 'weather', args: { city: 'Rome' } }, thoughtSignature: 'skip_thought_signature_validator' }, parts[1]]);
+    expect(result.inputTransformations).toEqual([{ type: 'imported_history', path: 'contents.0.parts.0', reason: 'canonical_tool_history_changed' }]);
+  });
 });

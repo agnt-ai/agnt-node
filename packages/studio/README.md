@@ -359,3 +359,26 @@ Sources: [OpenAI reasoning](https://developers.openai.com/api/docs/guides/reason
 [Anthropic preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking),
 [Gemini Generate Content thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking),
 [Gemini thought signatures](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures).
+
+The adapter reconciles canonical tool-call ID repairs, call removals/additions and
+visible content edits with stored native output. Unedited items retain their exact
+order, IDs, phases, argument spelling and opaque values. Removed function calls
+are not replayed, repaired IDs match their results, and added calls appear once.
+Such edits can still degrade provider continuity. For a compatible Gemini native
+turn, if a signed function call's arguments changed, or a removed signed call
+leaves an unsigned survivor, only the affected reconstructed call uses Gemini's
+documented imported-history `skip_thought_signature_validator` sentinel. Traces
+report `inputTransformations` with `type: imported_history` and
+`reason: canonical_tool_history_changed`; an unchanged turn uses its original
+signature. Recognizable legacy Gemini parts use the same reconciliation. Gemini's
+preexisting function-name IDs are not unique routing IDs; the adapter matches
+arguments before pairing duplicate names and never transfers another call's
+signature to a surviving sibling. Cross-model/provider fallback into an ongoing
+signed tool exchange can still need a restarted or explicitly imported history.
+Automatic Anthropic prefix recovery in this release is bounded to adaptive/default
+compatible modes; explicit manual and between_tools modes are not auto-recovered.
+
+This change is a 0.0.65 release candidate. Publish the reviewed SDK package first,
+then update the backend's exact dependency and lockfile to that published artifact,
+build/deploy it, and verify real provider traces. A locally packed tarball is for
+review/integration proof and does not establish a deployed or published version.
