@@ -155,15 +155,15 @@ describe('AnthropicExecutor reasoning (opt-in)', () => {
     }
   });
 
-  it('does not strip sampling params for legacy-thinking models — they stay allowed there', async () => {
+  it('strips incompatible sampling parameters for manual thinking', async () => {
     stub();
     const ex = new AnthropicExecutor(config('claude-haiku-4-5', { reasoning_effort: 'low', maxTokens: 16000, temperature: 0.7, top_p: 0.9 }));
     await ex.invoke([{ role: 'user', content: 'hi' }]);
 
     const sent = anthropicStream.mock.calls[0][0];
     expect(sent.thinking).toEqual({ type: 'enabled', budget_tokens: 2048 });
-    expect(sent.temperature).toBe(0.7);
-    expect(sent.top_p).toBe(0.9);
+    expect(sent.temperature).toBeUndefined();
+    expect(sent.top_p).toBeUndefined();
   });
 
   it('clamps the legacy thinking budget to leave room for max_tokens (never >= max_tokens)', async () => {
@@ -198,7 +198,7 @@ describe('AnthropicExecutor reasoning (opt-in)', () => {
     expect(sent.reasoning_effort).toBeUndefined();
   });
 
-  it('is a no-op when reasoning_effort is unset (existing behavior unchanged)', async () => {
+  it('keeps default thinking but strips rejected sampling knobs when effort is unset', async () => {
     stub();
     const ex = new AnthropicExecutor(config('claude-opus-4-8', { temperature: 0.5 }));
     await ex.invoke([{ role: 'user', content: 'hi' }]);
@@ -206,8 +206,8 @@ describe('AnthropicExecutor reasoning (opt-in)', () => {
     const sent = anthropicStream.mock.calls[0][0];
     expect(sent.thinking).toBeUndefined();
     expect(sent.output_config).toBeUndefined();
-    // Without opt-in we don't touch sampling params — behavior is unchanged.
-    expect(sent.temperature).toBe(0.5);
+    // Current model families reject sampling knobs independently of effort.
+    expect(sent.temperature).toBeUndefined();
   });
 
   it('captures response thinking blocks into rawParts', async () => {
@@ -278,12 +278,12 @@ describe('AnthropicExecutor Opus 5.5 / Sonnet 5.5', () => {
     }
   });
 
-  it('leaves existing Sonnet 5 / Fable 5 / Opus 5 sampling params alone when no effort is set', async () => {
+  it('strips rejected Sonnet 5 / Fable 5 / Opus 5 sampling params when effort is unset', async () => {
     for (const model of ['claude-sonnet-5', 'claude-fable-5-1', 'claude-opus-5']) {
       stub();
       const ex = new AnthropicExecutor(config(model, { temperature: 0.4 }));
       await ex.invoke([{ role: 'user', content: 'hi' }]);
-      expect(anthropicStream.mock.calls[0][0].temperature).toBe(0.4);
+      expect(anthropicStream.mock.calls[0][0].temperature).toBeUndefined();
       vi.clearAllMocks();
     }
   });

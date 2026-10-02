@@ -4,7 +4,7 @@
  * Fire-and-forget trace payloads to the observability API.
  */
 
-import type { TracingConfig, Message, PromptManifestV2 } from './types.js';
+import type { TracingConfig, Message, PromptManifestV2, ReasoningConfig, InputTransformation, PrefixBindingRecovery } from './types.js';
 
 export interface TracePayload {
   promptName: string;
@@ -20,6 +20,10 @@ export interface TracePayload {
   cacheReadTokens?: number;
   /** Provider-reported reasoning detail; a subset of outputTokens. */
   reasoningTokens?: number;
+  reasoningConfig?: ReasoningConfig;
+  nativeStatePresence?: { present: boolean; provider?: string; model?: string; format?: string; observedReasoningParts?: number };
+  inputTransformations?: InputTransformation[];
+  prefixBindingRecovery?: PrefixBindingRecovery;
   cost: number;
   duration: number;
   model: {

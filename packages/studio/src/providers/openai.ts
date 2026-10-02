@@ -6,6 +6,7 @@
 
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
+import { nativeItems, responsesSummaries, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import {
   streamWithRetry,
@@ -250,7 +251,7 @@ export default class OpenAIExecutor extends BaseExecutor {
       }
     );
 
-    return this.#formatResponsesResult(response);
+    return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };
   }
 
   /**
@@ -319,6 +320,14 @@ export default class OpenAIExecutor extends BaseExecutor {
     const input: any[] = [];
 
     for (const msg of messages) {
+      const replay = nativeItems(msg, this.provider, this.model, 'openai-responses');
+      if (replay) {
+        // The native output already contains text/functions in their original order.
+        // Canonical fields are for routing/display, not a second replay source.
+        input.push(...replay);
+        continue;
+      }
+
       // Tool result → function_call_output, referenced by the originating
       // tool call's id. `output` must be a JSON string.
       if (msg.role === 'tool') {
@@ -453,7 +462,7 @@ export default class OpenAIExecutor extends BaseExecutor {
         }
         tool_calls.push({ id: item.call_id, name: item.name, args });
       }
-      // reasoning items carry no user-visible content — skipped.
+      // Reasoning is retained in nativeState; only public summaries are displayed.
     }
 
     // Responses usage: input_tokens INCLUDES cached (input_tokens_details.
@@ -470,6 +479,8 @@ export default class OpenAIExecutor extends BaseExecutor {
         role: 'assistant',
         content,
         tool_calls,
+        nativeState: { provider: this.provider, model: this.model, format: 'openai-responses', items: response?.output ?? [] },
+        ...(responsesSummaries(response?.output ?? []).length ? { reasoningSummary: responsesSummaries(response.output) } : {}),
       },
       usage: {
         input_tokens: Math.max(0, inputTokens - cachedTokens),

@@ -295,3 +295,67 @@ const executor = await createExecutor({
 ## License
 
 MIT
+
+### Native reasoning replay and observation
+
+Provider `invoke()` results can carry `message.nativeState` with the producing
+provider, model, wire format and complete ordered native output items. Persist
+this envelope unchanged when resuming an unfinished tool exchange. The compatible
+adapter replays it once instead of reconstructing a second copy of the assistant
+text and calls. OpenAI and Azure Responses preserve IDs, phase, summaries and
+opaque encrypted content; Gemini preserves signed parts on tool and final-answer
+turns; Anthropic preserves the complete content block order. Compatibility is
+conservatively exact provider/model/format. It does not promise cross-model or
+cross-provider portability. Older `rawParts` snapshots still work for recognizable
+Anthropic/Gemini shapes; an incompatible envelope never falls back to those parts.
+
+`message.reasoningSummary` contains only supported public summary text, separate
+from the answer. Summary collection remains opt-in through the provider's settings
+(`reasoning.summary`, `thinking.display`, or `includeThoughts`). No setting exposes
+a universal raw reasoning transcript. Opaque state and legacy signed parts are
+excluded from SDK traces and `llm_output` hook payloads. Traces report state
+presence, public summaries, actual constructed `reasoningConfig` settings and
+provider-reported reasoning counts. A missing count is unknown; zero is retained.
+The count is a detail of inclusive output usage, not an extra billing bucket.
+
+Gemini's generic `reasoning_effort` mapping applies only to supported model
+families. Generate Content Gemini 3 uses supported `thinkingLevel` values;
+Gemini 2.5 uses SDK budget choices of 1024/8192/16384 for low/medium/high within the
+provider's ranges. `none` maps to budget zero only on 2.5 Flash, where disabling
+thinking is supported. Explicit native budgets or levels win. Unsupported tiers,
+unknown models and specialized image/audio/live models keep their native defaults.
+
+Anthropic manual thinking drops incompatible forced tool choices, temperature,
+and top_k; top_p is retained only within 0.95–1. Supported adaptive models retain
+forced tool choices, except models that reject all forcing. The exported
+`anthropicSupportsForcedTools(model, thinking)` predicate uses the actual request
+thinking mode. Requested `thinking.display` and `thinking.block_binding` survive
+effort translation.
+
+New Anthropic models also bind thinking to the system prompt, tool definitions and
+conversation prefix. Exact model provenance alone does not prove that a replayed
+block is valid after a prefix edit. The adapter retries the exact documented
+prefix-binding 400 once with the provider's `drop_block` policy and the
+`thinking-binding-controls-2026-08-01` beta header, when adaptive thinking is
+compatible. This is degraded recovery: stale reasoning can be dropped by the
+provider. It does not restore continuity lost through a prefix edit. Generic or
+tampered signature errors and unsupported thinking modes are not retried this way.
+An explicit caller `error` or `drop_block` policy takes precedence. A successful
+recovery is logged, traced as `prefixBindingRecovery`, and retained in the
+compatible `nativeState.replayPolicy` for checkpoint resume and in the executor
+instance for subsequent requests. `inputTransformations` reports the provider's
+block paths/types/reasons without opaque contents.
+
+To observe prefix mismatch reports without selecting a new policy, set
+`metadata.anthropic_beta` to `['thinking-binding-controls-2026-08-01']`. This maps
+to the header, and alone leaves the provider's existing mismatch behavior intact.
+Existing beta values are merged during recovery. Preserving reasoning across
+compaction and changing lazy tools requires preserving the valid prefix or using
+the provider's server-side context editing; that broader harness policy is not
+implemented by this SDK replay envelope.
+
+Sources: [OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning),
+[Anthropic thinking](https://platform.claude.com/docs/en/build-with-claude/thinking),
+[Anthropic preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking),
+[Gemini Generate Content thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking),
+[Gemini thought signatures](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures).

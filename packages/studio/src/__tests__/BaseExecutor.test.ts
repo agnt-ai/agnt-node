@@ -97,7 +97,10 @@ describe('reasoning-token usage', () => {
 
     const ex = new TestExecutor(makeConfig(makeManifest(), { hooks }));
     ex.invoke.mockResolvedValue({
-      message: { role: 'assistant', content: 'ok' },
+      message: { role: 'assistant', content: 'ok', rawParts: [{ signature: 'opaque-legacy' }], nativeState: { provider: 'anthropic', model: 'claude-sonnet-4-5', format: 'anthropic-content', items: [{ signature: 'opaque-native' }] }, reasoningSummary: [{ type: 'summary_text', text: 'Public summary' }] },
+      reasoningConfig: { provider: 'anthropic', model: 'claude-sonnet-4-5', source: 'provider-request', settings: { thinking: { type: 'enabled', budget_tokens: 1024 } } },
+      inputTransformations: [{ type: 'thinking_dropped', path: 'messages.1.content.0', reason: 'prefix_binding_mismatch' }],
+      prefixBindingRecovery: { attempted: true, reason: 'prefix_binding_mismatch', requestedBehavior: 'drop_block' },
       usage: {
         input_tokens: 40,
         output_tokens: 120,
@@ -111,6 +114,13 @@ describe('reasoning-token usage', () => {
       outputTokens: 120,
       reasoningTokens: 80,
     });
+    expect(JSON.stringify(tracePayload)).not.toContain('opaque-');
+    expect(tracePayload?.output).toMatchObject({ content: 'ok', reasoningSummary: [{ type: 'summary_text', text: 'Public summary' }] });
+    expect(tracePayload?.nativeStatePresence).toEqual({ present: true, provider: 'anthropic', model: 'claude-sonnet-4-5', format: 'anthropic-content', observedReasoningParts: 0 });
+    expect(tracePayload?.reasoningConfig.settings.thinking.budget_tokens).toBe(1024);
+    expect(tracePayload?.prefixBindingRecovery.attempted).toBe(true);
+    expect(tracePayload?.inputTransformations[0].reason).toBe('prefix_binding_mismatch');
+    expect(result.messages?.find((m: any) => m.role === 'assistant')?.nativeState?.items).toEqual([{ signature: 'opaque-native' }]);
     expect(tracePayload).toMatchObject({
       inputTokens: 40,
       outputTokens: 120,
