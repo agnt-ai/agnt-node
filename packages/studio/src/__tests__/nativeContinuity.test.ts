@@ -159,6 +159,9 @@ describe('Anthropic prefix binding recovery', () => {
     expect(anthropicStream.mock.lastCall![0].thinking.block_binding).toEqual({ prefix_mismatch_behavior: 'drop_block' });
     await ex.invoke(messages); // instance remembers the successful recovery even when only initial messages are supplied
     expect(anthropicStream.mock.lastCall![0].thinking.block_binding).toEqual({ prefix_mismatch_behavior: 'drop_block' });
+    (ex as any).model = 'claude-opus-5-5'; // same-provider fallback changes the model on this instance
+    await ex.invoke(messages);
+    expect(anthropicStream.mock.lastCall![0].thinking).toEqual({ type: 'adaptive' });
   });
   it.each(['error', 'drop_block'])('preserves explicit caller %s policy without automatic retry', async policy => {
     anthropicStream.mockImplementation(() => { throw mismatch; });

@@ -66,7 +66,7 @@ const LEAKED_TOOL_CALL_PATTERN = /<invoke\s+name=["']/i;
 
 export default class AnthropicExecutor extends BaseExecutor {
   private client: Anthropic;
-  private prefixMismatchDrop = false;
+  private prefixMismatchDrop?: { provider: string; model: string };
 
   constructor(config: BaseExecutorConfig) {
     super(config);
@@ -138,11 +138,12 @@ export default class AnthropicExecutor extends BaseExecutor {
     }
     const explicitBinding = providerParams.thinking?.block_binding?.prefix_mismatch_behavior;
     const replayDrop = messages.some(message => nativeItems(message, this.provider, this.model, 'anthropic-content') && message.nativeState?.replayPolicy?.prefixMismatchBehavior === 'drop_block');
+    const instanceDrop = this.prefixMismatchDrop?.provider === this.provider && this.prefixMismatchDrop?.model === this.model;
     const canBind = params.thinking?.type === 'adaptive' || (!params.thinking && /^claude-(opus-5-5|sonnet-5-5|fable-5-1|mythos-5-1)(-|$)/i.test(this.model));
     if (params.thinking?.block_binding) {
       betaValues = [...new Set([...betaValues, 'thinking-binding-controls-2026-08-01'])];
     }
-    if (canBind && (explicitBinding === 'drop_block' || (!explicitBinding && (this.prefixMismatchDrop || replayDrop)))) {
+    if (canBind && (explicitBinding === 'drop_block' || (!explicitBinding && (instanceDrop || replayDrop)))) {
       params.thinking = { ...(params.thinking || { type: 'adaptive' }), block_binding: { prefix_mismatch_behavior: 'drop_block' } };
       betaValues = [...new Set([...betaValues, 'thinking-binding-controls-2026-08-01'])];
     }
@@ -242,7 +243,7 @@ export default class AnthropicExecutor extends BaseExecutor {
       requestParams = { ...params, thinking: { ...(params.thinking || { type: 'adaptive' }), block_binding: { prefix_mismatch_behavior: 'drop_block' } } };
       betaValues = [...new Set([...betaValues, 'thinking-binding-controls-2026-08-01'])];
       response = await invokeRequest();
-      this.prefixMismatchDrop = true;
+      this.prefixMismatchDrop = { provider: this.provider, model: this.model };
     }
 
     // Format response to match expected structure
