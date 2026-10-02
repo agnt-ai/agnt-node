@@ -28,6 +28,18 @@ function responses(reasoning: number | undefined) {
   responsesCreate.mockImplementation(async () => openAIResponsesStreamFromResponse({ status: 'completed', output, usage: { input_tokens: 50, output_tokens: 30, input_tokens_details: { cached_tokens: 10 }, output_tokens_details: reasoning === undefined ? {} : { reasoning_tokens: reasoning } } }));
 }
 describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureExecutor]] as const)('%s Responses native continuity', (provider, Executor) => {
+  it.each(['low', 'none', undefined])('preserves explicit native effort or fills summary-only reasoning (native effort=%s)', async effort => {
+    responses(0);
+    const reasoning = { summary: 'auto', ...(effort === undefined ? {} : { effort }) };
+    const metadata = { reasoning_effort: 'high', reasoning };
+    const originalMetadata = structuredClone(metadata);
+    const result = await new Executor(config(provider, 'gpt-5.6', metadata)).invoke([{ role: 'user', content: 'hi' }]);
+    const effectiveReasoning = { summary: 'auto', effort: effort ?? 'high' };
+    expect(responsesCreate.mock.calls[0][0].reasoning).toEqual(effectiveReasoning);
+    expect(responsesCreate.mock.calls[0][0]).not.toHaveProperty('reasoning_effort');
+    expect(result.reasoningConfig).toEqual({ provider, model: 'gpt-5.6', source: 'provider-request', settings: { reasoning: effectiveReasoning } });
+    expect(metadata).toEqual(originalMetadata);
+  });
   it('replays exact ordered output once, preserving IDs, phase, opaque state and two function results', async () => {
     responses(17);
     const ex = new Executor(config(provider, 'gpt-5.6', { reasoning_effort: 'high', reasoning: { summary: 'auto' } }));

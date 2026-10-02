@@ -286,7 +286,7 @@ export default class OpenAIExecutor extends BaseExecutor {
       params[key] = value;
     }
 
-    if (metadata.reasoning_effort) {
+    if (metadata.reasoning_effort && params.reasoning?.effort == null) {
       params.reasoning = { ...(params.reasoning || {}), effort: metadata.reasoning_effort };
     }
     if (metadata.verbosity) {
