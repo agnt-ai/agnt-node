@@ -1,3 +1,4 @@
+import { traceMessage, nativeStatePresence } from './providers/nativeState.js';
 /**
  * BaseExecutor — V2 PromptManifest native executor
  *
@@ -838,7 +839,7 @@ export default class BaseExecutor {
       usage.totalCostUSD = this.calculateCost(result.usage ?? 0, usage.outputTokens);
 
       this.messages.push(result.message);
-      await this.sendTurnTrace(result.usage || { input_tokens: 0, output_tokens: 0 }, turnDuration, usage.totalCostUSD);
+      await this.sendTurnTrace(result.usage || { input_tokens: 0, output_tokens: 0 }, turnDuration, usage.totalCostUSD, result.reasoningConfig, result.inputTransformations, result.prefixBindingRecovery);
 
       // No tools → return message content directly
       if (!enableToolCalls || this.allToolDefs.length === 0) {
@@ -1001,7 +1002,7 @@ export default class BaseExecutor {
       this.messages.push(message);
 
       const turnCost = this.calculateCost(result.usage ?? 0, result.usage?.output_tokens || 0);
-      await this.sendTurnTrace(result.usage || { input_tokens: 0, output_tokens: 0 }, turnDuration, turnCost);
+      await this.sendTurnTrace(result.usage || { input_tokens: 0, output_tokens: 0 }, turnDuration, turnCost, result.reasoningConfig, result.inputTransformations, result.prefixBindingRecovery);
     }
 
     if (this.cancelled) return { ok: false, status: 'cancelled' };
@@ -1457,7 +1458,10 @@ export default class BaseExecutor {
   protected async sendTurnTrace(
     turnUsage: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number; reasoning_output_tokens?: number } | null | undefined,
     turnDuration: number,
-    cost: number
+    cost: number,
+    reasoningConfig?: InvokeResult['reasoningConfig'],
+    inputTransformations?: InvokeResult['inputTransformations'],
+    prefixBindingRecovery?: InvokeResult['prefixBindingRecovery']
   ): Promise<void> {
     if (!this.tracing && !this.hooks?.has('llm_output')) return;
 
@@ -1475,8 +1479,12 @@ export default class BaseExecutor {
       manifest: this.manifest,
       etag: this.manifest.metadata.etag || null,
       variables: this.variables,
-      messages: messagesWithoutOutput.slice(2),
-      output: lastAssistant || null,
+      messages: messagesWithoutOutput.slice(2).map(traceMessage),
+      output: lastAssistant ? traceMessage(lastAssistant) : null,
+      nativeStatePresence: nativeStatePresence(lastAssistant),
+      ...(reasoningConfig ? { reasoningConfig } : {}),
+      ...(inputTransformations ? { inputTransformations } : {}),
+      ...(prefixBindingRecovery ? { prefixBindingRecovery } : {}),
       inputTokens:  totalInput,
       outputTokens: totalOutput,
       totalTokens:  totalInput + totalOutput,

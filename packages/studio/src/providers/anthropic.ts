@@ -6,6 +6,8 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import BaseExecutor from '../BaseExecutor.js';
+import { anthropicSupportsForcedTools, isAnthropicPrefixMismatch } from './anthropicThinking.js';
+import { nativeItems, legacyParts, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { fileToAnthropicDocument } from './fileAttachment.js';
 import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
@@ -16,24 +18,10 @@ import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
  * sampling knobs (`temperature`/`top_p`/`top_k`) and `budget_tokens` with a 400.
  * On these models thinking is OFF unless `thinking: {type:'adaptive'}` is sent
  * explicitly (Opus 4.7/4.8), so effort has no effect without it. Older Claude
- * models (Sonnet 4.5, Haiku 4.5, Opus 4.6/4.5) are intentionally excluded — they
- * use `budget_tokens`, still accept sampling params, and reject `effort`.
+ * models use a separate legacy budget mapping below.
  * Confirmed against the claude-api reference (2026-07-21).
  */
 const ANTHROPIC_REASONING_FAMILY = /^claude-(opus-5|opus-4-8|opus-4-7|sonnet-5|fable-5|mythos-5)(-|$)/i;
-
-/** The 5.5 models (Opus 5.5 always thinks; Sonnet 5.5 thinks by default) — they run
- * adaptive thinking even when the request sets no `thinking`, so a named
- * tool_choice 400s on them with no effort configured. Deliberately NOT the older
- * Opus 5 / Sonnet 5 / Fable / Mythos: their no-effort behavior is left as it was. */
-const ANTHROPIC_ALWAYS_THINKING = /^claude-(opus-5-5|sonnet-5-5)(-|$)/i;
-
-/** Models that reject ANY forced tool use: `tool_choice` `any` or `tool` is a 400
- * ("type "tool" and "any" are not supported for this model"), with or without
- * thinking. Only `auto`/`none` are accepted. Opus 5.5 and Sonnet 5.5 (Opus 5 and
- * Sonnet 5 still accept forcing). Verified 2026-10-01 against the Anthropic
- * Opus 5.5 / Sonnet 5.5 migration guides. */
-const ANTHROPIC_NO_FORCED_TOOL_USE = /^claude-(opus-5-5|sonnet-5-5)(-|$)/i;
 
 /** Legacy sampling knobs the reasoning family rejects (400) alongside adaptive thinking. */
 const ANTHROPIC_REASONING_UNSUPPORTED_PARAMS = ['temperature', 'top_p', 'top_k', 'budget_tokens'];
@@ -78,6 +66,7 @@ const LEAKED_TOOL_CALL_PATTERN = /<invoke\s+name=["']/i;
 
 export default class AnthropicExecutor extends BaseExecutor {
   private client: Anthropic;
+  private prefixMismatchDrop?: { provider: string; model: string };
 
   constructor(config: BaseExecutorConfig) {
     super(config);
@@ -119,6 +108,11 @@ export default class AnthropicExecutor extends BaseExecutor {
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
     // Extract provider-specific parameters from model config
     const providerParams = this.#extractProviderParams();
+    // Beta controls belong in the header, not in the Messages body. This is
+    // opt-in observation/policy: a header alone does not change mismatch handling.
+    const beta = providerParams.anthropic_beta;
+    delete providerParams.anthropic_beta;
+    let betaValues: string[] = (Array.isArray(beta) ? beta : beta ? String(beta).split(',') : []).map(value => String(value).trim()).filter(Boolean);
 
     // Extract system messages (Anthropic requires separate system parameter)
     const systemMessages = messages.filter(m => m.role === 'system');
@@ -135,8 +129,24 @@ export default class AnthropicExecutor extends BaseExecutor {
     // Reasoning: opt-in via the model-strategy's `reasoning_effort` (the console
     // Effort control). When set on a reasoning-family model, turn on adaptive
     // thinking + `output_config.effort` and drop the params that 400 alongside
-    // it. When unset, this is a no-op — existing behavior is unchanged.
+    // it. Unset effort leaves the provider thinking default; sampling restrictions still apply.
     this.#applyReasoningParams(params);
+    if (params.thinking?.type === 'enabled') {
+      delete params.temperature;
+      delete params.top_k;
+      if (params.top_p != null && (params.top_p < 0.95 || params.top_p > 1)) delete params.top_p;
+    }
+    const explicitBinding = providerParams.thinking?.block_binding?.prefix_mismatch_behavior;
+    const replayDrop = messages.some(message => nativeItems(message, this.provider, this.model, 'anthropic-content') && message.nativeState?.replayPolicy?.prefixMismatchBehavior === 'drop_block');
+    const instanceDrop = this.prefixMismatchDrop?.provider === this.provider && this.prefixMismatchDrop?.model === this.model;
+    const canBind = params.thinking?.type === 'adaptive' || (!params.thinking && /^claude-(opus-5-5|sonnet-5-5|fable-5-1|mythos-5-1)(-|$)/i.test(this.model));
+    if (params.thinking?.block_binding) {
+      betaValues = [...new Set([...betaValues, 'thinking-binding-controls-2026-08-01'])];
+    }
+    if (canBind && (explicitBinding === 'drop_block' || (!explicitBinding && (instanceDrop || replayDrop)))) {
+      params.thinking = { ...(params.thinking || { type: 'adaptive' }), block_binding: { prefix_mismatch_behavior: 'drop_block' } };
+      betaValues = [...new Set([...betaValues, 'thinking-binding-controls-2026-08-01'])];
+    }
     // ── Prompt caching: ALWAYS explicit block-level breakpoints ──────────────
     // A top-level `cache_control` is NOT honored by Anthropic (cache_control
     // lives on content blocks), which left the big stable prefix re-written
@@ -193,15 +203,8 @@ export default class AnthropicExecutor extends BaseExecutor {
     if (options.tool_choice && options.tool_choice !== 'auto') {
       params.tool_choice = this.#formatToolChoice(options.tool_choice);
     }
-    // Anthropic rejects tool_choice:{type:'tool'} ('specified') when thinking is active.
-    // Downgrade to 'any' — still forces a tool call, compatible with thinking.
-    if ((params.thinking || ANTHROPIC_ALWAYS_THINKING.test(this.model || '')) && params.tool_choice?.type === 'tool') {
-      params.tool_choice = { type: 'any' };
-    }
-    // Opus 5.5 / Sonnet 5.5 reject `any` as well, so forcing is not possible at all:
-    // fall back to the default (`auto`) rather than send a request that always 400s.
-    if (ANTHROPIC_NO_FORCED_TOOL_USE.test(this.model || '') && (params.tool_choice?.type === 'any' || params.tool_choice?.type === 'tool')) {
-      this.log(`[AnthropicExecutor] forced tool_choice (${params.tool_choice.type}) dropped — ${this.model} does not support forced tool use`);
+    if (!anthropicSupportsForcedTools(this.model, params.thinking) && (params.tool_choice?.type === 'any' || params.tool_choice?.type === 'tool')) {
+      this.log(`[AnthropicExecutor] forced tool_choice (${params.tool_choice.type}) dropped — incompatible with ${this.model} thinking configuration`);
       delete params.tool_choice;
     }
 
@@ -213,9 +216,11 @@ export default class AnthropicExecutor extends BaseExecutor {
     // failure (stall or network drop) discards the partial and retries the whole
     // prompt, up to the retry budget.
     this.debug(`[AnthropicExecutor] Final messages payload:\n${JSON.stringify({ system: params.system, messages: params.messages }, null, 2)}`);
-    const response = await streamWithRetry(
+    let requestParams = params;
+    let prefixBindingRecovery: InvokeResult['prefixBindingRecovery'];
+    const invokeRequest = () => streamWithRetry(
       async (guard) => {
-        const stream = this.client.messages.stream(params, { signal: guard.signal });
+        const stream = this.client.messages.stream(requestParams, { signal: guard.signal, ...(betaValues.length ? { headers: { 'anthropic-beta': betaValues.join(',') } } : {}) });
         stream.on('streamEvent', () => guard.bump());
         return await stream.finalMessage();
       },
@@ -225,6 +230,21 @@ export default class AnthropicExecutor extends BaseExecutor {
         log: (m) => this.log(m),
       }
     );
+
+    let response;
+    try {
+      response = await invokeRequest();
+    } catch (error) {
+      // Retry the exact documented prefix error once. Explicit caller policy
+      // wins; generic signature failures and unsupported modes remain errors.
+      if (!isAnthropicPrefixMismatch(error) || explicitBinding || !canBind || params.thinking?.block_binding?.prefix_mismatch_behavior === 'drop_block') throw error;
+      this.log('[AnthropicExecutor] prefix binding mismatch: retrying once with provider drop_block; prior reasoning may be dropped');
+      prefixBindingRecovery = { attempted: true, reason: 'prefix_binding_mismatch', requestedBehavior: 'drop_block' };
+      requestParams = { ...params, thinking: { ...(params.thinking || { type: 'adaptive' }), block_binding: { prefix_mismatch_behavior: 'drop_block' } } };
+      betaValues = [...new Set([...betaValues, 'thinking-binding-controls-2026-08-01'])];
+      response = await invokeRequest();
+      this.prefixMismatchDrop = { provider: this.provider, model: this.model };
+    }
 
     // Format response to match expected structure
     const usageTyped = response.usage as typeof response.usage & {
@@ -246,15 +266,25 @@ export default class AnthropicExecutor extends BaseExecutor {
       (b: any) => b?.type === 'thinking' || b?.type === 'redacted_thinking'
     );
 
+    const reasoningSummary = reasoningBlocks.filter((block: any) => block.type === 'thinking' && block.thinking).map((block: any) => ({ type: 'summary_text' as const, text: block.thinking }));
+    const transformations = (response as any).input_transformations;
+    const inputTransformations = Array.isArray(transformations) ? transformations
+      .filter((entry: any) => entry && typeof entry.type === 'string' && typeof entry.path === 'string' && typeof entry.reason === 'string')
+      .map((entry: any) => ({ type: entry.type, path: entry.path, reason: entry.reason })) : undefined;
     const extractedText = this.#extractTextContent(response.content);
     const extractedToolCalls = this.#extractToolCalls(response.content);
     this.#warnIfLeakedToolCall(extractedText, extractedToolCalls);
 
     return {
+      reasoningConfig: requestReasoningConfig(this.provider, this.model, requestParams),
+      ...(inputTransformations ? { inputTransformations } : {}),
+      ...(prefixBindingRecovery ? { prefixBindingRecovery } : {}),
       message: {
         role: 'assistant',
         content: extractedText,
         tool_calls: extractedToolCalls,
+        nativeState: { provider: this.provider, model: this.model, format: 'anthropic-content', items: response.content || [], ...(requestParams.thinking?.block_binding?.prefix_mismatch_behavior === 'drop_block' ? { replayPolicy: { prefixMismatchBehavior: 'drop_block' as const } } : {}) },
+        ...(reasoningSummary.length ? { reasoningSummary } : {}),
         ...(reasoningBlocks.length ? { rawParts: reasoningBlocks } : {})
       },
       usage: {
@@ -282,6 +312,13 @@ export default class AnthropicExecutor extends BaseExecutor {
     const formatted: any[] = [];
 
     for (const msg of messages) {
+      const replay = nativeItems(msg, this.provider, this.model, 'anthropic-content');
+      if (replay) {
+        formatted.push({ role: 'assistant', content: [...replay] });
+        continue;
+      }
+      const rawParts = legacyParts(msg, 'anthropic-content');
+
       // Skip system messages (handled separately in Anthropic)
       if (msg.role === 'system') {
         continue;
@@ -308,8 +345,8 @@ export default class AnthropicExecutor extends BaseExecutor {
 
         // Thinking blocks first, verbatim (with signature) — Anthropic requires
         // them ahead of tool_use on the same-model turn when thinking is on.
-        if (Array.isArray(msg.rawParts) && msg.rawParts.length) {
-          content.push(...msg.rawParts);
+        if (rawParts && rawParts.length) {
+          content.push(...rawParts);
         }
 
         // Add text content if present
@@ -339,8 +376,8 @@ export default class AnthropicExecutor extends BaseExecutor {
 
       // Assistant final-answer turn that carried thinking blocks: echo them
       // back verbatim ahead of the text so a same-model continuation doesn't 400.
-      if (msg.role === 'assistant' && Array.isArray(msg.rawParts) && msg.rawParts.length) {
-        const content: any[] = [...msg.rawParts];
+      if (msg.role === 'assistant' && rawParts && rawParts.length) {
+        const content: any[] = [...rawParts];
         if (msg.content) {
           content.push({
             type: 'text',
@@ -539,7 +576,7 @@ export default class AnthropicExecutor extends BaseExecutor {
     return toolUseBlocks.map(block => ({
       id: block.id,
       name: block.name,
-      args: block.input
+      args: structuredClone(block.input)
     }));
   }
 
@@ -597,19 +634,16 @@ export default class AnthropicExecutor extends BaseExecutor {
    * `output_config.effort` plus `thinking: {type:'adaptive'}`. We map it only for
    * the reasoning family (Opus 4.7/4.8, Sonnet 5, Fable 5) and, when we do,
    * strip the legacy sampling knobs + `budget_tokens` that 400 alongside adaptive
-   * thinking. When `reasoning_effort` is unset, this is a no-op — thinking stays
-   * off and existing behavior is unchanged. `reasoning_effort` itself is always
+   * thinking. Unset effort leaves native thinking defaults unchanged. `reasoning_effort` itself is always
    * removed from the outgoing params (it is never a valid Anthropic field).
    */
   #applyReasoningParams(params: Record<string, any>): void {
     const effort = params.reasoning_effort;
     delete params.reasoning_effort;
 
-    // Opus 5.5 / Sonnet 5.5 400 on sampling knobs whether or not an effort is
-    // set, so strip them even on the no-effort path. Every other family member
-    // keeps the unchanged no-op below when no effort is given.
+    // Current adaptive model families reject sampling knobs on every request.
     const inFamily = ANTHROPIC_REASONING_FAMILY.test(this.model || '');
-    if (inFamily && (effort || ANTHROPIC_ALWAYS_THINKING.test(this.model || ''))) {
+    if (inFamily) {
       for (const key of ANTHROPIC_REASONING_UNSUPPORTED_PARAMS) {
         delete params[key];
       }
@@ -617,16 +651,24 @@ export default class AnthropicExecutor extends BaseExecutor {
 
     if (!effort) return;
 
+    // Explicit native mode/budget is authoritative. Display and binding alone
+    // still allow the generic effort mapping to fill the mode.
+    if (params.thinking?.type != null || params.thinking?.budget_tokens != null) {
+      if (inFamily && params.thinking?.type === 'adaptive' && params.output_config?.effort == null) {
+        params.output_config = { ...(params.output_config || {}), effort };
+      }
+      return;
+    }
+
     if (inFamily) {
-      params.thinking = { type: 'adaptive' };
-      params.output_config = { ...(params.output_config || {}), effort };
+      params.thinking = { ...(params.thinking?.display ? { display: params.thinking.display } : {}), ...(params.thinking?.block_binding ? { block_binding: params.thinking.block_binding } : {}), type: 'adaptive' };
+      params.output_config = { effort, ...(params.output_config || {}) };
       return;
     }
 
     if (ANTHROPIC_LEGACY_THINKING_FAMILY.test(this.model || '')) {
-      // No adaptive thinking / output_config.effort here — sampling params
-      // (temperature/top_p/top_k) stay untouched, they're allowed alongside
-      // legacy thinking on these models.
+      // Legacy budget mapping; manual-thinking sampling constraints are applied
+      // after this request is constructed.
       const maxTokens = params.max_tokens || 4096;
       const room = maxTokens - LEGACY_THINKING_OUTPUT_HEADROOM;
       if (room < LEGACY_THINKING_MIN_BUDGET) {
@@ -638,7 +680,7 @@ export default class AnthropicExecutor extends BaseExecutor {
       }
       const target = LEGACY_THINKING_BUDGET_BY_EFFORT[effort] ?? LEGACY_THINKING_BUDGET_DEFAULT;
       const budgetTokens = Math.max(LEGACY_THINKING_MIN_BUDGET, Math.min(target, room));
-      params.thinking = { type: 'enabled', budget_tokens: budgetTokens };
+      params.thinking = { ...(params.thinking?.display ? { display: params.thinking.display } : {}), ...(params.thinking?.block_binding ? { block_binding: params.thinking.block_binding } : {}), type: 'enabled', budget_tokens: budgetTokens };
       return;
     }
 

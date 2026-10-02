@@ -1,12 +1,3 @@
-/**
- * Regression: Anthropic rejects `tool_choice: {type:'tool', name:...}`
- * ("specified") when `thinking` is active (400). Confirmed from a production
- * trace where `forceNextTool` sent exactly that shape on the next turn after
- * a reasoning-family model call. Fix: downgrade to `{type:'any'}` when
- * thinking is on — still forces a tool call, just not a specific one, which
- * is what the API allows alongside thinking.
- */
-
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { anthropicMessageStream } from './_streamMocks.js';
 
@@ -50,8 +41,8 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe('AnthropicExecutor tool_choice downgrade when thinking is active', () => {
-  it('downgrades a specified tool_choice to {type:"any"} when thinking is on (the production 400)', async () => {
+describe('AnthropicExecutor tool_choice compatibility with thinking', () => {
+  it('preserves specified tool choice under supported adaptive thinking', async () => {
     stub();
     const ex = new AnthropicExecutor(config('claude-opus-4-8', { reasoning_effort: 'high' }));
     await ex.invoke(
@@ -61,9 +52,7 @@ describe('AnthropicExecutor tool_choice downgrade when thinking is active', () =
 
     const sent = anthropicStream.mock.calls[0][0];
     expect(sent.thinking).toEqual({ type: 'adaptive' });
-    // Must NOT be the specific-tool shape Anthropic rejects alongside thinking.
-    expect(sent.tool_choice).toEqual({ type: 'any' });
-    expect(sent.tool_choice.name).toBeUndefined();
+    expect(sent.tool_choice).toEqual({ type: 'tool', name: 'set_alarm' });
   });
 
   it('keeps the specified tool_choice untouched when thinking is off', async () => {
@@ -95,9 +84,9 @@ describe('AnthropicExecutor tool_choice downgrade when thinking is active', () =
 
 const tools = [{ name: 'finish', description: 'd', parameters: { type: 'object', properties: {} } }] as any;
 
-describe('Opus 5.5 / Sonnet 5.5 reject forced tool use entirely', () => {
+describe('models that reject forced tool use entirely', () => {
   it('drops tool_choice tool/any (sent as auto) instead of 400ing', async () => {
-    for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5']) {
+    for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
       for (const tool_choice of [{ type: 'tool', name: 'finish' }, { type: 'any' }]) {
         stub();
         const ex = new AnthropicExecutor(config(model, {}));
@@ -108,8 +97,8 @@ describe('Opus 5.5 / Sonnet 5.5 reject forced tool use entirely', () => {
     }
   });
 
-  it('leaves Sonnet 5 / Opus 5 / Fable 5 forced tool_choice untouched when no effort is set', async () => {
-    for (const model of ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5-1']) {
+  it('preserves supported Sonnet 5 / Opus 5 / Fable 5 forced tool_choice with no effort', async () => {
+    for (const model of ['claude-sonnet-5', 'claude-opus-5', 'claude-fable-5']) {
       stub();
       const ex = new AnthropicExecutor(config(model, {}));
       await ex.invoke([{ role: 'user', content: 'hi' }], { tools, tool_choice: { type: 'tool', name: 'finish' } as any });
@@ -117,4 +106,15 @@ describe('Opus 5.5 / Sonnet 5.5 reject forced tool use entirely', () => {
       vi.clearAllMocks();
     }
   });
+});
+
+it('drops both forced choices under manual thinking and keeps valid top_p', async () => {
+  for (const tool_choice of ['required', { type: 'tool', name: 'finish' }]) {
+    stub();
+    const ex = new AnthropicExecutor(config('claude-haiku-4-5', { thinking: { type: 'enabled', budget_tokens: 1024 }, temperature: 0.7, top_k: 40, top_p: 0.98 }));
+    await ex.invoke([{ role: 'user', content: 'hi' }], { tools, tool_choice: tool_choice as any });
+    const sent = anthropicStream.mock.lastCall![0];
+    expect(sent.tool_choice).toBeUndefined();
+    expect(sent.temperature).toBeUndefined(); expect(sent.top_k).toBeUndefined(); expect(sent.top_p).toBe(0.98);
+  }
 });

@@ -13,6 +13,23 @@ export interface ToolDefinition {
   function: ToolFunction;
 }
 
+/** Opaque replay state. Persist unchanged; never render or send items to tracing.
+ * Compatibility is deliberately exact provider + model + wire format. */
+export interface NativeState {
+  provider: string;
+  model: string;
+  format: 'openai-responses' | 'anthropic-content' | 'gemini-parts';
+  items: any[];
+  /** Persist a documented recovery choice across compatible checkpoint replay. */
+  replayPolicy?: { prefixMismatchBehavior: 'drop_block' };
+}
+
+/** Public provider summary, separate from the assistant answer and opaque state. */
+export interface ReasoningSummary {
+  type: 'summary_text';
+  text: string;
+}
+
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string | any[];
@@ -20,6 +37,8 @@ export interface Message {
   tool_call_id?: string;
   name?: string;
   rawParts?: any[];
+  nativeState?: NativeState;
+  reasoningSummary?: ReasoningSummary[];
   /** RR `release_after_read` (RUNTIME_EFFICIENCY.md Phase 2): the agent
    *  declared this tool result will be read once and dropped. Providers that
    *  support manual cache breakpoints (Anthropic) keep it out of the cached
@@ -114,6 +133,10 @@ export interface Usage {
 
 export interface InvokeResult {
   message: Message;
+  reasoningConfig?: ReasoningConfig;
+  /** Provider reports of dropped or mismatched thinking, never opaque content. */
+  inputTransformations?: InputTransformation[];
+  prefixBindingRecovery?: PrefixBindingRecovery;
   usage?: {
     input_tokens: number;
     output_tokens: number;
@@ -137,6 +160,31 @@ export interface InvokeResult {
   stopReason?: string;
   /** Earlier chain members that failed before this one succeeded (invokeWithFallback). */
   fallbackTrail?: FallbackTrailEntry[];
+}
+
+export interface InputTransformation {
+  type: string;
+  path: string;
+  reason: string;
+}
+
+export interface PrefixBindingRecovery {
+  attempted: true;
+  reason: 'prefix_binding_mismatch';
+  requestedBehavior: 'drop_block';
+}
+
+/** Known request settings, not a claim about how much reasoning occurred. */
+export interface ReasoningConfig {
+  provider: string;
+  model: string;
+  source: 'provider-request';
+  settings: {
+    reasoning?: { effort?: string; summary?: string; context?: string };
+    thinking?: { type?: string; budget_tokens?: number; display?: string; block_binding?: { prefix_mismatch_behavior?: string } };
+    output_config?: { effort?: string };
+    thinkingConfig?: { thinkingLevel?: string; thinkingBudget?: number; includeThoughts?: boolean };
+  };
 }
 
 /** Coarse, provider-independent failure category, derived from TYPED provider

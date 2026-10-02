@@ -6,7 +6,9 @@
 
 import { GoogleGenerativeAI, Content, Part, FunctionDeclaration, Tool } from '@google/generative-ai';
 import BaseExecutor from '../BaseExecutor.js';
-import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
+import { nativeItems, legacyParts, requestReasoningConfig, GEMINI_IMPORTED_HISTORY_SIGNATURE } from './nativeState.js';
+import { geminiThinkingConfig } from './geminiThinking.js';
+import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult, InputTransformation } from '../types.js';
 import { fileToGeminiPart } from './fileAttachment.js';
 import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
 
@@ -50,7 +52,7 @@ export default class GoogleExecutor extends BaseExecutor {
     const providerParams = this.#extractProviderParams();
 
     // Format messages for Gemini (separate system from conversation)
-    const { systemInstruction, contents } = this.#formatMessages(messages);
+    const { systemInstruction, contents, inputTransformations } = this.#formatMessages(messages);
 
     // Build model config
     const modelConfig: any = {
@@ -135,13 +137,18 @@ export default class GoogleExecutor extends BaseExecutor {
     }
 
     // Extract content and tool calls
-    const textContent = this.#extractTextContent(candidate.content);
-    const toolCalls = this.#extractToolCalls(candidate.content);
+    const rawParts = streamedParts.length > 0 ? streamedParts : (candidate.content.parts ?? []);
+    // The old SDK aggregate strips thought flags as well as signatures. Extract
+    // both answer and summaries from the same raw parts we preserve for replay.
+    const textContent = this.#extractTextContent({ ...candidate.content, parts: rawParts });
+    const toolCalls = this.#extractToolCalls({ ...candidate.content, parts: rawParts });
+    const reasoningSummary = rawParts.filter((part: any) => part.thought === true && typeof part.text === 'string')
+      .map((part: any) => ({ type: 'summary_text' as const, text: part.text }));
 
     // Extract usage
     // Include thoughtsTokenCount (Gemini 2.5+) in output tokens since it's generated reasoning
     const metadata = response.usageMetadata as any;
-    const thoughtsTokens = metadata?.thoughtsTokenCount || 0;
+    const thoughtsTokens = metadata?.thoughtsTokenCount;
     // Google's promptTokenCount INCLUDES cachedContentTokenCount (the cached
     // count is a subset), unlike Anthropic where input_tokens excludes cache.
     // Subtract the cached tokens out so input_tokens is the UNCACHED count,
@@ -153,9 +160,10 @@ export default class GoogleExecutor extends BaseExecutor {
     const promptTokens = response.usageMetadata?.promptTokenCount || 0;
     const usage = {
       input_tokens: Math.max(0, promptTokens - cachedTokens),
-      output_tokens: (response.usageMetadata?.candidatesTokenCount || 0) + thoughtsTokens,
+      output_tokens: (response.usageMetadata?.candidatesTokenCount || 0) + (thoughtsTokens ?? 0),
       cache_read_input_tokens: cachedTokens,
-      cache_creation_input_tokens: 0
+      cache_creation_input_tokens: 0,
+      ...(typeof thoughtsTokens === 'number' ? { reasoning_output_tokens: thoughtsTokens } : {})
     };
 
     // rawParts preserves thought parts (incl. thoughtSignature) so they can be
@@ -163,11 +171,15 @@ export default class GoogleExecutor extends BaseExecutor {
     // models. Prefer the raw stream chunks (signature intact); fall back to the
     // aggregated candidate parts only if the stream yielded none.
     return {
+      reasoningConfig: requestReasoningConfig(this.provider, this.model, modelConfig),
+      ...(inputTransformations.length ? { inputTransformations } : {}),
       message: {
         role: 'assistant',
         content: textContent,
         tool_calls: toolCalls,
-        rawParts: streamedParts.length > 0 ? streamedParts : (candidate.content.parts ?? [])
+        rawParts,
+        nativeState: { provider: this.provider, model: this.model, format: 'gemini-parts', items: rawParts },
+        ...(reasoningSummary.length ? { reasoningSummary } : {})
       },
       usage
     };
@@ -185,11 +197,12 @@ export default class GoogleExecutor extends BaseExecutor {
    * Gemini expects: systemInstruction (string) + contents (Content[])
    * Content = { role: 'user' | 'model', parts: Part[] }
    */
-  #formatMessages(messages: Message[]): { systemInstruction?: string; contents: Content[] } {
+  #formatMessages(messages: Message[]): { systemInstruction?: string; contents: Content[]; inputTransformations: InputTransformation[] } {
     const systemMessages = messages.filter(m => m.role === 'system');
     const systemInstruction = systemMessages.map(m => m.content).join('\n\n');
 
     const contents: Content[] = [];
+    const inputTransformations: InputTransformation[] = [];
 
     for (const msg of messages) {
       // Skip system messages (handled separately)
@@ -228,15 +241,17 @@ export default class GoogleExecutor extends BaseExecutor {
         continue;
       }
 
+      const replay = nativeItems(msg, this.provider, this.model, 'gemini-parts') ?? legacyParts(msg, 'gemini-parts');
+      if (msg.role === 'assistant' && replay) {
+        replay.forEach((part, index) => {
+          if (part.thoughtSignature === GEMINI_IMPORTED_HISTORY_SIGNATURE) inputTransformations.push({ type: 'imported_history', path: `contents.${contents.length}.parts.${index}`, reason: 'canonical_tool_history_changed' });
+        });
+        contents.push({ role: 'model', parts: replay });
+        continue;
+      }
+
       // Handle assistant messages with tool_calls
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        // Echo raw parts verbatim when available — preserves thought parts with
-        // thoughtSignature required by Gemini thinking models on subsequent turns.
-        if (msg.rawParts && msg.rawParts.length > 0) {
-          contents.push({ role: 'model', parts: msg.rawParts });
-          continue;
-        }
-
         // Fallback: reconstruct from tool_calls (non-thinking models)
         const parts: Part[] = [];
 
@@ -279,7 +294,8 @@ export default class GoogleExecutor extends BaseExecutor {
 
     return {
       systemInstruction: systemInstruction || undefined,
-      contents
+      contents,
+      inputTransformations
     };
   }
 
@@ -452,7 +468,7 @@ export default class GoogleExecutor extends BaseExecutor {
     }
 
     const textParts = content.parts
-      .filter(part => 'text' in part)
+      .filter(part => 'text' in part && (part as any).thought !== true)
       .map(part => (part as any).text);
 
     return textParts.join('');
@@ -473,7 +489,7 @@ export default class GoogleExecutor extends BaseExecutor {
         toolCalls.push({
           id: part.functionCall.name, // Use function name as ID since Google doesn't provide IDs
           name: part.functionCall.name,
-          args: part.functionCall.args || {}
+          args: structuredClone(part.functionCall.args || {})
         });
       }
     }
@@ -486,7 +502,10 @@ export default class GoogleExecutor extends BaseExecutor {
    */
   #extractProviderParams(): Record<string, any> {
     const metadata = (this.primaryModelConfig as any).metadata || {};
-    const { displayName, ...providerParams } = metadata;
+    const { displayName, reasoning_effort, ...providerParams } = metadata;
+    const existing = providerParams.generationConfig?.thinkingConfig;
+    const mapped = geminiThinkingConfig(this.model, reasoning_effort, existing);
+    if (mapped) providerParams.generationConfig = { ...(providerParams.generationConfig || {}), thinkingConfig: mapped };
     return providerParams;
   }
 }

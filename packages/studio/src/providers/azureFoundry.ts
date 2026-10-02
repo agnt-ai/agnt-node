@@ -29,6 +29,7 @@
 
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
+import { nativeItems, responsesSummaries, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import {
   streamWithRetry,
@@ -415,7 +416,7 @@ export default class AzureFoundryExecutor extends BaseExecutor {
       }
     );
 
-    return this.#formatResponsesResult(response);
+    return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };
   }
 
   /** Build the `/responses` request from canonical messages + invoke options.
@@ -435,7 +436,7 @@ export default class AzureFoundryExecutor extends BaseExecutor {
       params[key] = value;
     }
 
-    if (metadata.reasoning_effort) {
+    if (metadata.reasoning_effort && params.reasoning?.effort == null) {
       params.reasoning = { ...(params.reasoning || {}), effort: metadata.reasoning_effort };
     }
     if (metadata.verbosity) {
@@ -463,6 +464,14 @@ export default class AzureFoundryExecutor extends BaseExecutor {
     const input: any[] = [];
 
     for (const msg of messages) {
+      const replay = nativeItems(msg, this.provider, this.model, 'openai-responses');
+      if (replay) {
+        // The native output already contains text/functions in their original order.
+        // Canonical fields are for routing/display, not a second replay source.
+        input.push(...replay);
+        continue;
+      }
+
       if (msg.role === 'tool') {
         input.push({
           type: 'function_call_output',
@@ -577,18 +586,22 @@ export default class AzureFoundryExecutor extends BaseExecutor {
     const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
     const inputTokens = usage.input_tokens ?? 0;
     const outputTokens = usage.output_tokens ?? 0;
+    const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
 
     return {
       message: {
         role: 'assistant',
         content,
         tool_calls,
+        nativeState: { provider: this.provider, model: this.model, format: 'openai-responses', items: response?.output ?? [] },
+        ...(responsesSummaries(response?.output ?? []).length ? { reasoningSummary: responsesSummaries(response.output) } : {}),
       },
       usage: {
         input_tokens: Math.max(0, inputTokens - cachedTokens),
         output_tokens: outputTokens,
         cache_read_input_tokens: cachedTokens,
         cache_creation_input_tokens: 0,
+        ...(typeof reasoningTokens === 'number' ? { reasoning_output_tokens: reasoningTokens } : {}),
       },
     };
   }

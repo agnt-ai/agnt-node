@@ -228,6 +228,7 @@ describe('GoogleExecutor streaming', () => {
     const rawChunk = {
       candidates: [{ content: { parts: [
         { text: 'thinking', thought: true, thoughtSignature: 'SIG_ABC123' },
+        { text: 'answer' },
         { functionCall: { name: 'geo', args: { city: 'NYC' } } },
       ] } }],
     };
@@ -239,7 +240,7 @@ describe('GoogleExecutor streaming', () => {
     // rawParts must retain the signature so it can be echoed back next turn.
     const thoughtPart = (res.message.rawParts as any[]).find((p) => p.thought);
     expect(thoughtPart?.thoughtSignature).toBe('SIG_ABC123');
-    // Content/toolCalls still come from the aggregate — unaffected.
+    // Answer extraction uses raw thought flags; aggregate has lost those flags.
     expect(res.message.content).toBe('answer');
     expect(res.message.tool_calls).toEqual([{ id: 'geo', name: 'geo', args: { city: 'NYC' } }]);
   });
