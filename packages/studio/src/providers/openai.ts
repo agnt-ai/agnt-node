@@ -6,6 +6,7 @@
 
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
+import { withFlatSystemMessages } from './systemContent.js';
 import { nativeItems, responsesSummaries, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import {
@@ -115,6 +116,8 @@ export default class OpenAIExecutor extends BaseExecutor {
    * Returns: { message: { role, content, tool_calls }, usage: { input_tokens, output_tokens } }
    */
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
+    // Automatic prefix caching: system parts (systemContent.ts) go out as the one joined string, stable prefix first.
+    messages = withFlatSystemMessages(messages);
     // Reasoning-family models (o1/o3/o4, gpt-5.x) are served over the OpenAI
     // Responses API (/v1/responses), not Chat Completions. Chat Completions
     // rejects the combination that matters most for these models — function

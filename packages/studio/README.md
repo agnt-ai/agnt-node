@@ -199,6 +199,24 @@ const executor = await createExecutor({
 const result = await executor.execute();
 ```
 
+## System prompt with a stable prefix
+
+When a system prompt has a part that is the same across calls and a part that changes on every call (a clock, live
+state), send the system message as text parts and mark the last stable part `cacheBoundary: true`:
+
+```js
+{ role: 'system', content: [
+  { type: 'text', text: stablePrompt, cacheBoundary: true },
+  { type: 'text', text: perCallPrompt },
+] }
+```
+
+Anthropic gets one system block per part, with its cache breakpoint on the marked part, so the stable prefix is read
+from the prompt cache across calls. OpenAI, Azure, OpenAI-compatible hosts, Gemini and Bedrock get the parts joined by a
+blank line (the same text as one string), stable prefix first, which is what automatic prefix caching needs. A string
+system message is unchanged. `SYSTEM_CACHE_BOUNDARY_SUPPORT` (exported, `1`) tells a caller this version understands
+the parts.
+
 ## Failure results
 
 A failed `execute()` returns `{ ok: false, error, failure }`. `error` is the message string (unchanged);

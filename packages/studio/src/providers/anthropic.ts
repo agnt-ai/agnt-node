@@ -11,6 +11,7 @@ import { nativeItems, legacyParts, requestReasoningConfig } from './nativeState.
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { fileToAnthropicDocument } from './fileAttachment.js';
 import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
+import { anthropicSystem } from './systemContent.js';
 
 /**
  * Claude's "reasoning family" — the current models whose reasoning is driven by
@@ -114,10 +115,6 @@ export default class AnthropicExecutor extends BaseExecutor {
     delete providerParams.anthropic_beta;
     let betaValues: string[] = (Array.isArray(beta) ? beta : beta ? String(beta).split(',') : []).map(value => String(value).trim()).filter(Boolean);
 
-    // Extract system messages (Anthropic requires separate system parameter)
-    const systemMessages = messages.filter(m => m.role === 'system');
-    const systemContent = systemMessages.map(m => m.content).join('\n\n');
-
     // Build request parameters
     const params: any = {
       model: this.model,
@@ -170,12 +167,10 @@ export default class AnthropicExecutor extends BaseExecutor {
     const cacheOn = !options.disableCache;
     const EPHEMERAL = { type: 'ephemeral' as const };
 
-    // System as a cached block.
-    if (systemContent) {
-      params.system = cacheOn
-        ? [{ type: 'text', text: systemContent, cache_control: EPHEMERAL }]
-        : systemContent;
-    }
+    // System as a cached block; a system message sent as parts with a `cacheBoundary` part gets one block per part
+    // and the breakpoint on that part, so its stable prefix is read across calls (systemContent.ts).
+    const system = anthropicSystem(messages, cacheOn);
+    if (system) params.system = system;
 
     // Tools — cache the last def so the whole (stable) tools array is one
     // cached segment.

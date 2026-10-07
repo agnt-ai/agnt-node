@@ -29,6 +29,7 @@
 
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
+import { withFlatSystemMessages } from './systemContent.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { streamWithRetry, consumeOpenAIStream, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
 
@@ -124,6 +125,8 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
    * Returns: { message: { role, content, tool_calls }, usage: {...disjoint buckets} }
    */
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
+    // Automatic prefix caching: system parts (systemContent.ts) go out as the one joined string, stable prefix first.
+    messages = withFlatSystemMessages(messages);
     const params: any = {
       model: this.model,
       messages: this.#formatMessages(messages),

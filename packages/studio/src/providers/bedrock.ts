@@ -6,6 +6,7 @@
 
 import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 import BaseExecutor from '../BaseExecutor.js';
+import { systemText } from './systemContent.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { fileToBedrockDocument } from './fileAttachment.js';
 
@@ -52,7 +53,7 @@ export default class BedrockExecutor extends BaseExecutor {
 
     // Extract system messages (Bedrock requires separate system parameter)
     const systemMessages = messages.filter(m => m.role === 'system');
-    const systemContent = systemMessages.map(m => m.content).join('\n\n');
+    const systemContent = systemMessages.map(m => systemText(m.content)).join('\n\n');
 
     // Build request parameters
     const params: any = {

@@ -29,6 +29,7 @@
 
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
+import { withFlatSystemMessages } from './systemContent.js';
 import { nativeItems, responsesSummaries, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import {
@@ -148,6 +149,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
    * Returns: { message: { role, content, tool_calls }, usage: {...disjoint buckets} }
    */
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
+    // Automatic prefix caching: system parts (systemContent.ts) go out as the one joined string, stable prefix first.
+    messages = withFlatSystemMessages(messages);
     // Reasoning-family models (gpt-5.x, gpt-6.x) only answer tool calls +
     // reasoning_effort on the Responses API — identical restriction to
     // direct OpenAI (see openai.ts). The Model Inference API (`/models`) has
