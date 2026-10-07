@@ -16,6 +16,7 @@ export { default as ImageCache } from './ImageCache.js';
 // ── Provider adapters ─────────────────────────────────────────────────────────
 export { default as AnthropicExecutor } from './providers/anthropic.js';
 export { anthropicSupportsForcedTools } from './providers/anthropicThinking.js';
+export { SYSTEM_CACHE_BOUNDARY_SUPPORT, systemText } from './providers/systemContent.js';
 export { default as OpenAIExecutor } from './providers/openai.js';
 export { default as BedrockExecutor } from './providers/bedrock.js';
 export { default as OpenAICompatibleExecutor, OPENAI_COMPATIBLE_BASE_URLS, OPENAI_COMPATIBLE_PROVIDERS } from './providers/openaiCompatible.js';

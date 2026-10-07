@@ -6,6 +6,7 @@
 
 import { GoogleGenerativeAI, Content, Part, FunctionDeclaration, Tool } from '@google/generative-ai';
 import BaseExecutor from '../BaseExecutor.js';
+import { systemText } from './systemContent.js';
 import { nativeItems, legacyParts, requestReasoningConfig, GEMINI_IMPORTED_HISTORY_SIGNATURE } from './nativeState.js';
 import { geminiThinkingConfig } from './geminiThinking.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult, InputTransformation } from '../types.js';
@@ -199,7 +200,7 @@ export default class GoogleExecutor extends BaseExecutor {
    */
   #formatMessages(messages: Message[]): { systemInstruction?: string; contents: Content[]; inputTransformations: InputTransformation[] } {
     const systemMessages = messages.filter(m => m.role === 'system');
-    const systemInstruction = systemMessages.map(m => m.content).join('\n\n');
+    const systemInstruction = systemMessages.map(m => systemText(m.content)).join('\n\n');
 
     const contents: Content[] = [];
     const inputTransformations: InputTransformation[] = [];
