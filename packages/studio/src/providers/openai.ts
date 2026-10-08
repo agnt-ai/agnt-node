@@ -7,6 +7,7 @@
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
+import { openaiCacheBuckets } from './openaiCacheUsage.js';
 import { nativeItems, responsesSummaries, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import {
@@ -189,7 +190,7 @@ export default class OpenAIExecutor extends BaseExecutor {
 
     // Format response to match expected structure
     const usageTyped = response.usage as typeof response.usage & {
-      prompt_tokens_details?: { cached_tokens?: number };
+      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
     };
     // OpenAI's prompt_tokens INCLUDES the cached tokens (cached_tokens is a
     // subset of prompt_tokens), unlike Anthropic where input_tokens excludes
@@ -199,12 +200,12 @@ export default class OpenAIExecutor extends BaseExecutor {
     // (input + cache_read + cache_creation), and cost is the sum of disjoint
     // buckets — so cache reads must not also live inside input_tokens or they
     // get charged twice.
-    const cachedTokens = usageTyped?.prompt_tokens_details?.cached_tokens ?? 0;
     // Streaming usage rides the final chunk (stream_options.include_usage). Real
     // OpenAI always sends it; guard so an OpenAI-compatible endpoint that omits
     // it degrades to zeros rather than crashing the run.
     const promptTokens = response.usage?.prompt_tokens ?? 0;
     const completionTokens = response.usage?.completion_tokens ?? 0;
+    const cacheBuckets = openaiCacheBuckets(promptTokens, usageTyped?.prompt_tokens_details);
     return {
       message: {
         role: message.role as Message['role'],
@@ -212,10 +213,8 @@ export default class OpenAIExecutor extends BaseExecutor {
         tool_calls: this.#extractToolCalls(message.tool_calls)
       },
       usage: {
-        input_tokens: Math.max(0, promptTokens - cachedTokens),
+        ...cacheBuckets,
         output_tokens: completionTokens,
-        cache_read_input_tokens: cachedTokens,
-        cache_creation_input_tokens: 0
       }
     };
   }
@@ -472,8 +471,8 @@ export default class OpenAIExecutor extends BaseExecutor {
     // cached_tokens is a subset), like Chat Completions' prompt_tokens. Subtract
     // it out so the four usage buckets stay disjoint across providers.
     const usage = response?.usage ?? {};
-    const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
     const inputTokens = usage.input_tokens ?? 0;
+    const cacheBuckets = openaiCacheBuckets(inputTokens, usage.input_tokens_details);
     const outputTokens = usage.output_tokens ?? 0;
     const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
 
@@ -486,10 +485,8 @@ export default class OpenAIExecutor extends BaseExecutor {
         ...(responsesSummaries(response?.output ?? []).length ? { reasoningSummary: responsesSummaries(response.output) } : {}),
       },
       usage: {
-        input_tokens: Math.max(0, inputTokens - cachedTokens),
+        ...cacheBuckets,
         output_tokens: outputTokens,
-        cache_read_input_tokens: cachedTokens,
-        cache_creation_input_tokens: 0,
         ...(typeof reasoningTokens === 'number' ? { reasoning_output_tokens: reasoningTokens } : {}),
       },
     };

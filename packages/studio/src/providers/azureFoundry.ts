@@ -30,6 +30,7 @@
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
+import { openaiCacheBuckets } from './openaiCacheUsage.js';
 import { nativeItems, responsesSummaries, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import {
@@ -212,10 +213,10 @@ export default class AzureFoundryExecutor extends BaseExecutor {
     // four usage buckets disjoint across providers (otherwise a cache read
     // gets billed twice — once as input, once as read).
     const usageTyped = response.usage as typeof response.usage & {
-      prompt_tokens_details?: { cached_tokens?: number };
+      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
     };
-    const cachedTokens = usageTyped?.prompt_tokens_details?.cached_tokens ?? 0;
     const promptTokens = response.usage?.prompt_tokens ?? 0;
+    const cacheBuckets = openaiCacheBuckets(promptTokens, usageTyped?.prompt_tokens_details);
     const completionTokens = response.usage?.completion_tokens ?? 0;
 
     const toolCalls = this.#extractToolCalls(message.tool_calls);
@@ -228,10 +229,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
         tool_calls: toolCalls,
       },
       usage: {
-        input_tokens: Math.max(0, promptTokens - cachedTokens),
+        ...cacheBuckets,
         output_tokens: completionTokens,
-        cache_read_input_tokens: cachedTokens,
-        cache_creation_input_tokens: 0,
       },
     };
   }
@@ -586,8 +585,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
     }
 
     const usage = response?.usage ?? {};
-    const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
     const inputTokens = usage.input_tokens ?? 0;
+    const cacheBuckets = openaiCacheBuckets(inputTokens, usage.input_tokens_details);
     const outputTokens = usage.output_tokens ?? 0;
     const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
 
@@ -600,10 +599,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
         ...(responsesSummaries(response?.output ?? []).length ? { reasoningSummary: responsesSummaries(response.output) } : {}),
       },
       usage: {
-        input_tokens: Math.max(0, inputTokens - cachedTokens),
+        ...cacheBuckets,
         output_tokens: outputTokens,
-        cache_read_input_tokens: cachedTokens,
-        cache_creation_input_tokens: 0,
         ...(typeof reasoningTokens === 'number' ? { reasoning_output_tokens: reasoningTokens } : {}),
       },
     };
