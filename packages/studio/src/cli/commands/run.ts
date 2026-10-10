@@ -7,7 +7,7 @@
  * separate admin surface: this is just another client of the existing API.
  *
  * Usage:
- *   agnt run list [--since 24h] [--status active] [--limit 50] [--profile <name>] [--json]
+ *   agnt run list [--since 24h] [--status active] [--limit 50] [--exclude-internal] [--profile <name>] [--json]
  *   agnt run task <taskId> [--profile <name>] [--json]
  *   agnt run chat <chatId> [--profile <name>] [--json]
  */
@@ -109,6 +109,7 @@ export interface RunListOptions {
   since?: string;
   status?: string;
   limit?: string;
+  excludeInternal?: boolean;
   profile?: string;
   json?: boolean;
 }
@@ -120,8 +121,8 @@ export async function runList(opts: RunListOptions): Promise<void> {
     const since = opts.since ? parseSince(opts.since) : null;
 
     const [{ tasks }, { chats }] = await Promise.all([
-      client.listTasks({ status: opts.status, perPage }),
-      client.listChats({ status: opts.status, perPage }),
+      client.listTasks({ status: opts.status, perPage, excludeInternal: opts.excludeInternal }),
+      client.listChats({ status: opts.status, perPage, excludeInternal: opts.excludeInternal }),
     ]);
 
     const recentTasks = since ? tasks.filter(t => new Date(t.updatedAt ?? t.createdAt) >= since) : tasks;

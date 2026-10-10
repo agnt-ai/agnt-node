@@ -60,9 +60,10 @@ runCmd
   .option('--since <window>', 'Time window, e.g. 24h, 45m, 2d, or an ISO timestamp')
   .option('--status <status>', 'Filter by status (task/chat status value)')
   .option('--limit <n>', 'Max results per collection', '50')
+  .option('--exclude-internal', "Hide tasks/chats from the account's developer/internal emails (the console 'Hide internal users' toggle)")
   .option('--profile <name>', 'Credentials profile to use')
   .option('--json', 'Print raw JSON instead of a human-readable summary')
-  .action(async (opts: { since?: string; status?: string; limit: string; profile?: string; json?: boolean }) => {
+  .action(async (opts: { since?: string; status?: string; limit: string; excludeInternal?: boolean; profile?: string; json?: boolean }) => {
     await runList(opts);
   });
 
