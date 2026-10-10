@@ -120,7 +120,7 @@ export class AgntApiClient {
    * GET /tasks — account-scoped (an account-level API key sees every task in
    * the account; a user-scoped key sees only its own). Sorted newest-created first.
    */
-  async listTasks(params: { status?: string; perPage?: number; page?: number } = {}): Promise<{
+  async listTasks(params: { status?: string; perPage?: number; page?: number; excludeInternal?: boolean } = {}): Promise<{
     tasks: TaskSummary[];
     total: number;
   }> {
@@ -128,6 +128,7 @@ export class AgntApiClient {
     if (params.status) query.set('status', params.status);
     if (params.perPage) query.set('perPage', String(params.perPage));
     if (params.page) query.set('page', String(params.page));
+    if (params.excludeInternal) query.set('excludeInternal', 'true');
     const qs = query.toString();
     const data = await this.request<{ ok: boolean; tasks: TaskSummary[]; total: number }>(
       `/tasks${qs ? `?${qs}` : ''}`,
@@ -141,7 +142,7 @@ export class AgntApiClient {
    * GET /chats — same account-wide/user-scoped split as listTasks. Sorted by
    * lastMessageAt, newest first.
    */
-  async listChats(params: { status?: string; perPage?: number; page?: number } = {}): Promise<{
+  async listChats(params: { status?: string; perPage?: number; page?: number; excludeInternal?: boolean } = {}): Promise<{
     chats: ChatSummary[];
     total: number;
   }> {
@@ -149,6 +150,7 @@ export class AgntApiClient {
     if (params.status) query.set('status', params.status);
     if (params.perPage) query.set('perPage', String(params.perPage));
     if (params.page) query.set('page', String(params.page));
+    if (params.excludeInternal) query.set('excludeInternal', 'true');
     const qs = query.toString();
     const data = await this.request<{ ok: boolean; chats: ChatSummary[]; total: number }>(
       `/chats${qs ? `?${qs}` : ''}`,
