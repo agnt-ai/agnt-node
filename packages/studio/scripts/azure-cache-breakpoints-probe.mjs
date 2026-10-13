@@ -18,7 +18,13 @@
  *   AZURE_FOUNDRY_ENDPOINT=https://<resource>.openai.azure.com/openai/v1 AZURE_FOUNDRY_API_KEY=... \
  *     MODEL=gpt-6.1-sol node scripts/azure-cache-breakpoints-probe.mjs
  *   PROVIDER=openai OPENAI_API_KEY=... MODEL=<gpt-5.6+ model> node scripts/azure-cache-breakpoints-probe.mjs
- * Options (env): TURNS (default 3), MODES (default "before,after"), EFFORT (default low).
+ * Long run past the 48-breakpoint cap (smaller prefix and outputs keep it to about $1-2 per mode at the rates above):
+ *   TURNS=55 PREFIX_TOKENS=4000 OUTPUT_TOKENS=200 AZURE_FOUNDRY_ENDPOINT=... AZURE_FOUNDRY_API_KEY=... MODEL=... node ...
+ * No credentials: OFFLINE=1 runs the same loop against a stub (usage numbers are fake) and still checks the wire bytes.
+ * Options (env): TURNS (default 3), MODES (default "before,after"), EFFORT (default low), PREFIX_TOKENS (default
+ * 40000: 3/4 system, 1/4 opening user message), OUTPUT_TOKENS (default 3000 per function_call_output), OFFLINE.
+ * Every turn also checks that the request repeats the previous one byte for byte (apart from breakpoint markers)
+ * and prints the first differing item when it does not ("prefix" column).
  */
 import { randomBytes } from 'node:crypto';
 import AzureFoundryExecutor from '../dist/providers/azureFoundry.js';
@@ -30,9 +36,13 @@ const MODEL = process.env.MODEL;
 const TURNS = Number(process.env.TURNS || 3);
 const MODES = (process.env.MODES || 'before,after').split(',').map((s) => s.trim()).filter(Boolean);
 const EFFORT = process.env.EFFORT || 'low';
+const PREFIX_TOKENS = Number(process.env.PREFIX_TOKENS || 40_000);
+const OUTPUT_TOKENS = Number(process.env.OUTPUT_TOKENS || 3_000);
+const OFFLINE = process.env.OFFLINE === '1';
 if (!MODEL) throw new Error('MODEL is required (the deployment name, e.g. a GPT-5.6+ deployment)');
 
-const credentials = PROVIDER === 'openai'
+const credentials = OFFLINE ? { openai: { apiKey: 'offline' }, azureFoundry: { apiKey: 'offline', endpoint: 'https://offline.invalid/openai/v1' } }
+  : PROVIDER === 'openai'
   ? { openai: { apiKey: required('OPENAI_API_KEY') } }
   : { azureFoundry: { apiKey: required('AZURE_FOUNDRY_API_KEY'), endpoint: required('AZURE_FOUNDRY_ENDPOINT') } };
 function required(name) { const v = process.env[name]; if (!v) throw new Error(`${name} is required`); return v; }
@@ -56,18 +66,18 @@ async function runMode(mode) {
     credentials, logLevel: 'silent',
   });
   const sent = [];
-  const create = ex.client.responses.create.bind(ex.client.responses);
-  ex.client.responses.create = (params, opts) => { sent.push(params); return create(params, opts); };
+  const create = OFFLINE ? offlineCreate : ex.client.responses.create.bind(ex.client.responses);
+  ex.client.responses.create = (params, opts) => { sent.push(structuredClone(params)); return create(params, opts); };
 
   const transcript = [
     { role: 'system', content: [
-      { type: 'text', text: `Probe ${nonce}. You are a research agent. Reference manual follows.\n${filler(1, 30_000)}`, cacheBoundary: true },
+      { type: 'text', text: `Probe ${nonce}. You are a research agent. Reference manual follows.\n${filler(1, Math.round(PREFIX_TOKENS * 0.75))}`, cacheBoundary: true },
       { type: 'text', text: `Run context: probe ${nonce}, mode ${mode}.` },
     ] },
-    { role: 'user', content: `Background material for the job:\n${filler(2, 10_000)}\n\nCall record_step once per turn with the next step number. Do not write prose.` },
+    { role: 'user', content: `Background material for the job:\n${filler(2, Math.round(PREFIX_TOKENS * 0.25))}\n\nCall record_step once per turn with the next step number. Do not write prose.` },
   ];
   console.log(`\n== ${mode.toUpperCase()} (${PROVIDER} ${MODEL}, nonce ${nonce})`);
-  console.log('turn  prompt   cached  written   fresh  hit%  breakpoints  mode');
+  console.log('turn  prompt   cached  written   fresh  hit%  breakpoints  mode               prefix');
   let cost = 0;
   for (let t = 1; t <= TURNS; t++) {
     const note = { role: 'user', content: `Communication timing context (guidance): turn ${t} at ${new Date().toISOString()}`, releaseAfterRead: true };
@@ -79,14 +89,34 @@ async function runMode(mode) {
     console.log([
       String(t).padStart(4), String(prompt).padStart(7), String(u.cache_read_input_tokens ?? 0).padStart(8), String(u.cache_creation_input_tokens ?? 0).padStart(8),
       String(u.input_tokens ?? 0).padStart(7), String(prompt ? Math.round(100 * (u.cache_read_input_tokens ?? 0) / prompt) : 0).padStart(5),
-      String(breakpointIndexes(params.input).length).padStart(12), `  ${params.prompt_cache_options?.mode ?? 'implicit(default)'}`,
+      String(breakpointIndexes(params.input).length).padStart(12), `  ${(params.prompt_cache_options?.mode ?? 'implicit(default)').padEnd(18)}`,
+      prefixCheck(sent.at(-2), params),
     ].join(' '));
     transcript.push(res.message);
     const calls = res.message.tool_calls?.length ? res.message.tool_calls : [];
     if (!calls.length) { console.log('  (no tool call; stopping)'); break; }
-    for (const call of calls) transcript.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ recorded: true, step: t, findings: filler(100 + t, 3_000) }) });
+    for (const call of calls) transcript.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify({ recorded: true, step: t, findings: filler(100 + t, OUTPUT_TOKENS) }) });
   }
   console.log(`  approx cost at gpt-6.1-sol Global Standard rates: $${cost.toFixed(3)}`);
+}
+
+/** 'same' when this request starts with the previous one minus its trailing note, ignoring breakpoint markers. */
+function prefixCheck(prev, params) {
+  if (!prev) return '-';
+  const unmark = (x) => JSON.stringify(x, (k, v) => (k === 'prompt_cache_breakpoint' ? undefined : v));
+  const before = prev.input.slice(0, -1);
+  for (let i = 0; i < before.length; i++) {
+    if (unmark(before[i]) !== unmark(params.input[i])) return `DIFFERS at item ${i}`;
+  }
+  return 'same';
+}
+
+let offlineN = 0;
+async function offlineCreate(params) {
+  offlineN += 1;
+  const response = { status: 'completed', output: [{ type: 'function_call', id: `fc_${offlineN}`, call_id: `call_${offlineN}`, name: 'record_step', arguments: `{"step":${offlineN}}` }],
+    usage: { input_tokens: Math.round(JSON.stringify(params.input).length / 4), output_tokens: 20, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } } };
+  return (async function* () { yield { type: 'response.completed', response }; })();
 }
 
 for (const mode of MODES) await runMode(mode);

@@ -107,7 +107,7 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureFoundryExecutor
 
     // The note is last and unmarked; the stable tail (newest function_call_output) is marked as an input_text array.
     const last = input.at(-1);
-    expect(last.content).toBe('Communication timing context (guidance): turn 3');
+    expect(last.content).toEqual([{ type: 'input_text', text: 'Communication timing context (guidance): turn 3' }]);
     const tail = input.at(-2);
     expect(tail).toMatchObject({ type: 'function_call_output', call_id: 'call_2' });
     expect(tail.output).toEqual([{ type: 'input_text', text: 'result call_2 '.repeat(40), prompt_cache_breakpoint: BP }]);
@@ -161,7 +161,7 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureFoundryExecutor
     const input = responsesCreate.mock.lastCall![0].input;
     const outputs = input.filter((i: any) => i.type === 'function_call_output');
     expect(outputs[0].output).toEqual([{ type: 'input_text', text: 'kept', prompt_cache_breakpoint: BP }]);
-    expect(outputs[1].output).toBe('read once');
+    expect(outputs[1].output).toEqual([{ type: 'input_text', text: 'read once' }]);
     expect(input[0].content).toEqual([{ type: 'input_text', text: 'sys', prompt_cache_breakpoint: BP }]);
   });
 
@@ -246,6 +246,22 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureFoundryExecutor
     expect(bps.at(-1)).toBe(input.length - 2); // the tail
     const prev = sent.at(-2)!.slice(0, -1);
     expect(bps).toContain(prev.length - 1); // the previous request's tail: this turn reads it
+  });
+
+  it('turns 40..70: each request repeats the previous one byte for byte apart from marker placement', async () => {
+    stubToolTurns();
+    const sent = await runLoop(new Executor(config(provider, 'gpt-6.1-sol')), 71);
+    const unmark = (x: any): any => JSON.parse(JSON.stringify(x), (k, v) => (k === 'prompt_cache_breakpoint' ? undefined : v));
+    for (let t = 40; t < 71; t++) {
+      const prev = sent[t - 1].slice(0, -1); // request t, minus its trailing note
+      const next = sent[t].slice(0, prev.length); // request t + 1, same positions
+      expect(json(unmark(next)), `request ${t + 1}`).toBe(json(unmark(prev)));
+      // Every item either keeps its exact bytes or only gains/loses the marker.
+      for (let i = 0; i < prev.length; i++) {
+        if (json(next[i]) !== json(prev[i])) expect(breakpointIndexes([prev[i]]).length + breakpointIndexes([next[i]]).length, `item ${i}`).toBe(1);
+      }
+      expect(breakpointIndexes(sent[t])).toContain(prev.length - 1);
+    }
   });
 
   it('never marks or creates an empty block: a blank tail falls back to the previous stable item', async () => {

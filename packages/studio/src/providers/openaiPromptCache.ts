@@ -16,13 +16,15 @@
  *      after it is not; a string system message gets it on the whole message.
  *   2. CONVERSATION TAIL: the last STABLE item of the request: the newest item before the trailing messages the caller
  *      flagged `releaseAfterRead` (the per-turn notes; the same flag keeps them out of Anthropic's cached prefix). A
- *      function_call_output carries it by sending its output as an `input_text` array (the documented array form of
- *      `function_call_output.output`) with the breakpoint on the last block.
+ *      function_call_output carries it as an `input_text` array (the documented array form of
+ *      `function_call_output.output`) with the breakpoint on the last block. In this mode every non-blank
+ *      function_call_output and string input message goes as that array form, marked or not, so dropping or adding
+ *      a marker never changes an item's other bytes.
  *   3. EARLIER TAILS: the same position before every earlier assistant turn, i.e. exactly where an earlier request of
  *      this conversation put its tail breakpoint. A request only READS a cache entry at a breakpoint it carries
  *      itself, so the previous turn's tail has to be marked again for this turn to read it. Every earlier tail is
- *      marked (so each item's bytes stay identical from the request that first sent it), up to MAX_BREAKPOINTS in
- *      all: past that the oldest tails drop, which keeps the static system breakpoint inside the 50 the service reads.
+ *      marked, up to MAX_BREAKPOINTS in all: past that the oldest tails lose their marker (only the marker), which
+ *      keeps the static system breakpoint inside the 50 the service reads.
  *
  * Write slots: the service writes at most four breakpoints per request, the latest four; earlier-turn breakpoints are
  * read-only and reads consider the latest 50. Here only the tail is new on a turn that follows an assistant turn (the
@@ -137,15 +139,27 @@ function markBlocks(blocks: any[]): any[] {
   return blocks.map((b, i) => (i === at ? { ...b, prompt_cache_breakpoint: BREAKPOINT } : b));
 }
 
-/** A copy of the item with a breakpoint on its last carrying block (string content becomes one input_text block).
- *  Only called on an item canCarry accepted, so no empty block is ever made. */
-function mark(item: any): any {
+/**
+ * The item's wire form in breakpoint mode: a non-blank string function_call_output or input-message content becomes
+ * one input_text block, whether or not it carries a marker now. Its bytes then depend only on its content, so adding
+ * or dropping a marker (a new tail, the MAX_BREAKPOINTS cap) never changes anything but the marker. A blank string
+ * stays a string on every turn (no empty block is ever made, and it never carries a marker).
+ */
+function arrayForm(item: any): any {
+  if (!item || typeof item !== 'object') return item;
   if (item.type === 'function_call_output') {
-    const output = typeof item.output === 'string' ? [{ type: 'input_text', text: item.output }] : item.output;
-    return { ...item, output: markBlocks(output) };
+    return typeof item.output === 'string' && !blank(item.output) ? { ...item, output: [{ type: 'input_text', text: item.output }] } : item;
   }
-  const content = typeof item.content === 'string' ? [{ type: 'input_text', text: item.content }] : item.content;
-  return { ...item, content: markBlocks(content) };
+  if ((item.type === undefined || item.type === 'message') && INPUT_ROLES.has(item.role) && typeof item.content === 'string' && !blank(item.content)) {
+    return { ...item, content: [{ type: 'input_text', text: item.content }] };
+  }
+  return item;
+}
+
+/** A copy of the item (already in arrayForm) with a breakpoint on its last carrying block. */
+function mark(item: any): any {
+  if (item.type === 'function_call_output') return { ...item, output: markBlocks(item.output) };
+  return { ...item, content: markBlocks(item.content) };
 }
 
 function isMarked(item: any): boolean {
@@ -189,7 +203,7 @@ export function systemItemWithBreakpoint(message: Message): any {
  */
 export function placeConversationBreakpoints(messages: Message[], groups: any[][], { cacheOn }: { cacheOn: boolean }): any[] {
   if (!cacheOn) return groups.flat();
-  const out = groups.map(g => g.slice());
+  const out = groups.map(g => g.map(arrayForm));
   // The last carrying item at or before message `from`, not before message `floor`, as [message, item].
   const lastCarrier = (from: number, floor: number): [number, number] | null => {
     for (let i = from; i >= floor; i--) {
