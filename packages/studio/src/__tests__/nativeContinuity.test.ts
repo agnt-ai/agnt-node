@@ -51,8 +51,12 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureExecutor]] as c
     expect(first.reasoningConfig).toMatchObject({ provider, model: 'gpt-5.6', source: 'provider-request', settings: { reasoning: { effort: 'high', summary: 'auto' } } });
     await ex.invoke([user, JSON.parse(JSON.stringify(first.message)), { role: 'tool', tool_call_id: 'call_1', content: '{"degrees":72}' }, { role: 'tool', tool_call_id: 'call_2', content: '{"time":"noon"}' }]);
     const input = responsesCreate.mock.calls[1][0].input;
+    // GPT-5.6+: the opening user message (the previous request's tail) and the newest result carry cache breakpoints
+    // (openaiPromptCache.ts); the replayed native output is untouched.
+    const bp = { mode: 'explicit' };
+    expect(input[0]).toEqual({ role: 'user', content: [{ type: 'input_text', text: 'Weather?', prompt_cache_breakpoint: bp }] });
     expect(input.slice(1, 5)).toEqual(output);
-    expect(input.slice(5)).toEqual([{ type: 'function_call_output', call_id: 'call_1', output: '{"degrees":72}' }, { type: 'function_call_output', call_id: 'call_2', output: '{"time":"noon"}' }]);
+    expect(input.slice(5)).toEqual([{ type: 'function_call_output', call_id: 'call_1', output: '{"degrees":72}' }, { type: 'function_call_output', call_id: 'call_2', output: [{ type: 'input_text', text: '{"time":"noon"}', prompt_cache_breakpoint: bp }] }]);
     expect(input.filter((i: any) => i.type === 'function_call')).toHaveLength(2);
     expect(input.filter((i: any) => i.type === 'message')).toHaveLength(1);
   });

@@ -206,7 +206,9 @@ describe('OpenAIExecutor reasoning-family routing (/v1/responses)', () => {
     const out = sent.input.find((i: any) => i.type === 'function_call_output');
     expect(fc).toMatchObject({ type: 'function_call', call_id: 'call_1', name: 'search' });
     expect(JSON.parse(fc.arguments)).toEqual({ q: 'x' });
-    expect(out).toMatchObject({ type: 'function_call_output', call_id: 'call_1', output: '{"result":"ok"}' });
+    // The newest result is the request's stable tail: its output goes as an input_text array carrying the GPT-5.6+
+    // cache breakpoint (openaiPromptCache.ts).
+    expect(out).toEqual({ type: 'function_call_output', call_id: 'call_1', output: [{ type: 'input_text', text: '{"result":"ok"}', prompt_cache_breakpoint: { mode: 'explicit' } }] });
     // Tool is flat (name/parameters at top level, no nested `function`).
     expect(sent.tools[0]).toMatchObject({ type: 'function', name: 'search' });
     expect(sent.tools[0].function).toBeUndefined();
@@ -280,6 +282,7 @@ describe('OpenAIExecutor reasoning-family routing (/v1/responses)', () => {
       type: 'input_file',
       filename: 'report.pdf',
       file_data: 'data:application/pdf;base64,JVBERi0x',
+      prompt_cache_breakpoint: { mode: 'explicit' },
     });
   });
 

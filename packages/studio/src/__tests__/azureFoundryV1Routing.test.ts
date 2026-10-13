@@ -118,7 +118,10 @@ describe('AzureFoundryExecutor — reasoning-family routing (v1 mode only)', () 
     const fc = sent.input.find((i: any) => i.type === 'function_call');
     const out = sent.input.find((i: any) => i.type === 'function_call_output');
     expect(fc).toMatchObject({ type: 'function_call', call_id: 'call_1', name: 'search' });
-    expect(out).toMatchObject({ type: 'function_call_output', call_id: 'call_1', output: '{"result":"ok"}' });
+    // The newest result is the request's stable tail: its output goes as an input_text array carrying the GPT-5.6+
+    // cache breakpoint (openaiPromptCache.ts).
+    expect(out).toEqual({ type: 'function_call_output', call_id: 'call_1', output: [{ type: 'input_text', text: '{"result":"ok"}', prompt_cache_breakpoint: { mode: 'explicit' } }] });
+    expect(sent.prompt_cache_options).toEqual({ mode: 'explicit' });
     expect(sent.tools[0]).toMatchObject({ type: 'function', name: 'search' });
     expect(sent.tools[0].function).toBeUndefined();
   });
@@ -143,6 +146,7 @@ describe('AzureFoundryExecutor — reasoning-family routing (v1 mode only)', () 
       type: 'input_file',
       filename: 'report.pdf',
       file_data: 'data:application/pdf;base64,JVBERi0x',
+      prompt_cache_breakpoint: { mode: 'explicit' },
     });
   });
 

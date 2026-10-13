@@ -8,6 +8,13 @@ import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
 import { openaiCacheBuckets } from './openaiCacheUsage.js';
+import {
+  breakpointsWanted,
+  isBreakpointRejection,
+  markBreakpointsRejected,
+  placeConversationBreakpoints,
+  systemItemWithBreakpoint,
+} from './openaiPromptCache.js';
 import { nativeItems, responsesSummaries, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import {
@@ -76,6 +83,8 @@ const RESPONSES_TRANSLATED_METADATA_KEYS = [
   'max_tokens',
   'max_completion_tokens',
   'max_output_tokens',
+  // Not a wire param: `false` turns the GPT-5.6+ cache breakpoints off (openaiPromptCache.ts).
+  'prompt_cache_breakpoints',
 ];
 
 export default class OpenAIExecutor extends BaseExecutor {
@@ -117,8 +126,6 @@ export default class OpenAIExecutor extends BaseExecutor {
    * Returns: { message: { role, content, tool_calls }, usage: { input_tokens, output_tokens } }
    */
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
-    // Automatic prefix caching: system parts (systemContent.ts) go out as the one joined string, stable prefix first.
-    messages = withFlatSystemMessages(messages);
     // Reasoning-family models (o1/o3/o4, gpt-5.x) are served over the OpenAI
     // Responses API (/v1/responses), not Chat Completions. Chat Completions
     // rejects the combination that matters most for these models — function
@@ -131,6 +138,10 @@ export default class OpenAIExecutor extends BaseExecutor {
     if (isReasoningFamilyModel(this.model)) {
       return this.#invokeResponses(messages, options);
     }
+    // Automatic prefix caching: system parts (systemContent.ts) go out as the one joined string, stable prefix first.
+    // Every GPT-5.6+ model is in the reasoning family and goes to Responses above (which handles system parts and the
+    // cache breakpoints itself, openaiPromptCache.ts), so no breakpoints are placed on Chat Completions.
+    messages = withFlatSystemMessages(messages);
 
     // Build request parameters
     const params: any = {
@@ -227,18 +238,38 @@ export default class OpenAIExecutor extends BaseExecutor {
    * shape (an `output[]` of items instead of `choices[0].message`) differ.
    */
   async #invokeResponses(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
-    const params = this.#buildResponsesRequest(messages, options);
+    const metadata = (this.primaryModelConfig as any).metadata || {};
+    const endpoint = String(this.client.baseURL ?? '');
+    const breakpoints = breakpointsWanted(this.provider, this.model, metadata, endpoint);
+    let params = this.#buildResponsesRequest(messages, options, breakpoints);
+    let response;
+    try {
+      response = await this.#streamResponses(params, options);
+    } catch (err) {
+      // An API or deployment that cannot take breakpoints answers 400 naming them: stop sending them for this model
+      // and retry this request once with automatic caching.
+      if (!breakpoints || !isBreakpointRejection(err)) throw err;
+      markBreakpointsRejected(this.provider, this.model, endpoint);
+      this.log(`[OpenAIExecutor] prompt cache breakpoints rejected for ${this.model}; retrying without them`);
+      params = this.#buildResponsesRequest(messages, options, false);
+      response = await this.#streamResponses(params, options);
+    }
 
+    return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };
+  }
+
+  async #streamResponses(params: Record<string, any>, options: InvokeOptions): Promise<any> {
     this.log('[OpenAIExecutor] Invoking (responses):', {
       model: params.model,
       effort: params.reasoning?.effort,
       tools: params.tools?.length || 0,
+      cacheMode: params.prompt_cache_options?.mode,
     });
 
     // Streamed, folded back into the terminal Response object (see
     // consumeOpenAIResponsesStream). The idle timer is bumped on every event;
     // a mid-stream failure discards the partial and retries the whole prompt.
-    const response = await streamWithRetry(
+    return await streamWithRetry(
       async (guard) => {
         const stream = await this.client.responses.create(
           { ...params, stream: true } as any,
@@ -252,8 +283,6 @@ export default class OpenAIExecutor extends BaseExecutor {
         log: (m) => this.log(m),
       }
     );
-
-    return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };
   }
 
   /**
@@ -268,12 +297,13 @@ export default class OpenAIExecutor extends BaseExecutor {
    *   max_tokens / *_completion_ → max_output_tokens
    *   temperature/top_p/…        → dropped (rejected by the reasoning family)
    */
-  #buildResponsesRequest(messages: Message[], options: InvokeOptions): Record<string, any> {
+  #buildResponsesRequest(messages: Message[], options: InvokeOptions, breakpoints = false): Record<string, any> {
     const metadata = (this.primaryModelConfig as any).metadata || {};
 
     const params: Record<string, any> = {
       model: this.model,
-      input: this.#formatResponsesInput(messages),
+      // `breakpoints`: GPT-5.6+ explicit cache breakpoints (openaiPromptCache.ts).
+      input: this.#formatResponsesInput(messages, breakpoints ? { cacheOn: !options.disableCache } : null),
       // Stateless: we replay the full conversation on every turn, so there's no
       // reason to have OpenAI persist server-side response state.
       store: false,
@@ -309,6 +339,12 @@ export default class OpenAIExecutor extends BaseExecutor {
       params.tool_choice = this.#formatResponsesToolChoice(options.tool_choice);
     }
 
+    // Only our breakpoints read and write (openaiPromptCache.ts): implicit mode would add a billed write on the
+    // per-turn note. A developer-set prompt_cache_options (metadata passthrough above) wins.
+    if (breakpoints && params.prompt_cache_options == null) {
+      params.prompt_cache_options = { mode: 'explicit' };
+    }
+
     return params;
   }
 
@@ -318,56 +354,60 @@ export default class OpenAIExecutor extends BaseExecutor {
    * `function_call_output` items keyed by `call_id`, rather than Chat
    * Completions' assistant `tool_calls` array + `role:'tool'` messages.
    */
-  #formatResponsesInput(messages: Message[]): any[] {
-    const input: any[] = [];
+  #formatResponsesInput(messages: Message[], cache: { cacheOn: boolean } | null = null): any[] {
+    if (!cache) return withFlatSystemMessages(messages).flatMap(msg => this.#responsesItems(msg));
+    // The last leading system message carries the static-prefix breakpoint; any other system message is flattened.
+    let lead = -1;
+    while (messages[lead + 1]?.role === 'system') lead++;
+    const flat = withFlatSystemMessages(messages);
+    const groups = messages.map((msg, i) => (i === lead ? [systemItemWithBreakpoint(msg)] : this.#responsesItems(flat[i])));
+    return placeConversationBreakpoints(messages, groups, cache);
+  }
 
-    for (const msg of messages) {
-      const replay = nativeItems(msg, this.provider, this.model, 'openai-responses');
-      if (replay) {
-        // The native output already contains text/functions in their original order.
-        // Canonical fields are for routing/display, not a second replay source.
-        input.push(...replay);
-        continue;
-      }
-
-      // Tool result → function_call_output, referenced by the originating
-      // tool call's id. `output` must be a JSON string.
-      if (msg.role === 'tool') {
-        input.push({
-          type: 'function_call_output',
-          call_id: msg.tool_call_id,
-          output:
-            typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
-        });
-        continue;
-      }
-
-      // Assistant turn that made tool calls: emit any text first, then one
-      // function_call item per call so a later function_call_output can bind to
-      // its call_id.
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        if (msg.content) {
-          input.push({ role: 'assistant', content: this.#formatResponsesContent(msg.content, 'assistant') });
-        }
-        for (const tc of msg.tool_calls) {
-          input.push({
-            type: 'function_call',
-            call_id: tc.id,
-            name: tc.name,
-            arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
-          });
-        }
-        continue;
-      }
-
-      // Plain message (system/user/assistant text or multimodal parts).
-      input.push({
-        role: msg.role,
-        content: this.#formatResponsesContent(msg.content, msg.role),
-      });
+  /** One canonical message → its Responses `input` items, in order. */
+  #responsesItems(msg: Message): any[] {
+    const replay = nativeItems(msg, this.provider, this.model, 'openai-responses');
+    if (replay) {
+      // The native output already contains text/functions in their original order.
+      // Canonical fields are for routing/display, not a second replay source.
+      return replay;
     }
 
-    return input;
+    // Tool result → function_call_output, referenced by the originating
+    // tool call's id. `output` is a JSON string (the breakpoint pass may turn it into an input_text array).
+    if (msg.role === 'tool') {
+      return [{
+        type: 'function_call_output',
+        call_id: msg.tool_call_id,
+        output:
+          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
+      }];
+    }
+
+    // Assistant turn that made tool calls: emit any text first, then one
+    // function_call item per call so a later function_call_output can bind to
+    // its call_id.
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      const items: any[] = [];
+      if (msg.content) {
+        items.push({ role: 'assistant', content: this.#formatResponsesContent(msg.content, 'assistant') });
+      }
+      for (const tc of msg.tool_calls) {
+        items.push({
+          type: 'function_call',
+          call_id: tc.id,
+          name: tc.name,
+          arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
+        });
+      }
+      return items;
+    }
+
+    // Plain message (system/user/assistant text or multimodal parts).
+    return [{
+      role: msg.role,
+      content: this.#formatResponsesContent(msg.content, msg.role),
+    }];
   }
 
   /**
