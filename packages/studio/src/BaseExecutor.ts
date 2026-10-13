@@ -699,10 +699,12 @@ export default class BaseExecutor {
   // (layers/agnt-shared/utils/modelPricing.mjs) — same semantics, duplicated
   // because the two are separate repos/runtimes.
   private static resolvePricingTier(pricing: ModelPricing | undefined, totalInputTokens: number): PricingRateSet {
+    const baseInput = pricing?.inputTokensPer1M ?? 3;
     const base: PricingRateSet = {
-      inputTokensPer1M: pricing?.inputTokensPer1M ?? 3,
+      inputTokensPer1M: baseInput,
       outputTokensPer1M: pricing?.outputTokensPer1M ?? 15,
-      cacheCreationTokensPer1M: pricing?.cacheCreationTokensPer1M ?? 0,
+      // No write rate: a cache write bills as ordinary input (never 0). Mirrors agnt-backend cacheWriteRate().
+      cacheCreationTokensPer1M: pricing?.cacheCreationTokensPer1M ?? baseInput,
       cacheReadTokensPer1M: pricing?.cacheReadTokensPer1M ?? 0,
     };
     const tiers = pricing?.tiers;
@@ -716,7 +718,7 @@ export default class BaseExecutor {
         resolved = {
           inputTokensPer1M: tier.inputTokensPer1M ?? 0,
           outputTokensPer1M: tier.outputTokensPer1M ?? 0,
-          cacheCreationTokensPer1M: tier.cacheCreationTokensPer1M ?? 0,
+          cacheCreationTokensPer1M: tier.cacheCreationTokensPer1M ?? tier.inputTokensPer1M ?? 0,
           cacheReadTokensPer1M: tier.cacheReadTokensPer1M ?? 0,
         };
       }
@@ -728,14 +730,16 @@ export default class BaseExecutor {
   //
   // Provider-agnostic, model-driven: cost is data, not branching. The four-term
   // formula is identical for every provider and model. Cache rates come straight
-  // from the catalog; a null/undefined cache rate contributes 0 — that is how
-  // "this provider doesn't charge for cache creation" is expressed (e.g. OpenAI
-  // and Google have no cache-creation rate). Never special-case a provider here.
+  // from the catalog. A null/undefined cache READ rate contributes 0; a
+  // null/undefined cache WRITE rate bills the write at the input rate (no
+  // premium, never free: OpenAI/Azure GPT-5.6+ writes are their own bucket since
+  // 0.0.67, and a catalog row without a write rate must not bill them as $0).
+  // Never special-case a provider here.
   //
   //   cost = input        /1e6 * inputTokensPer1M
   //        + output       /1e6 * outputTokensPer1M
   //        + cacheRead    /1e6 * (cacheReadTokensPer1M     ?? 0)
-  //        + cacheCreation/1e6 * (cacheCreationTokensPer1M ?? 0)
+  //        + cacheCreation/1e6 * (cacheCreationTokensPer1M ?? inputTokensPer1M)
   //
   // Rates are resolved PER CALL via resolvePricingTier() above, keyed off this
   // call's own total input tokens — see that method for why. Accepts either a
@@ -754,9 +758,9 @@ export default class BaseExecutor {
     const rates = BaseExecutor.resolvePricingTier(this.modelPricing, totalInputTokens);
     const inRate      = rates.inputTokensPer1M;
     const outRate     = rates.outputTokensPer1M;
-    // A null/undefined cache rate means this provider/model doesn't bill that
-    // bucket — it contributes 0. No provider-specific multiplier fallback.
-    const createRate  = rates.cacheCreationTokensPer1M  ?? 0;
+    // A missing write rate is already the input rate (resolvePricingTier); a
+    // missing read rate contributes 0. No provider-specific multiplier.
+    const createRate  = rates.cacheCreationTokensPer1M  ?? inRate;
     const readRate    = rates.cacheReadTokensPer1M      ?? 0;
 
     let costUSD = (outputTokens / 1_000_000) * outRate;

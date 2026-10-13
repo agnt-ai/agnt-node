@@ -7,6 +7,15 @@
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
+import { openaiCacheBuckets } from './openaiCacheUsage.js';
+import {
+  breakpointIndexes,
+  breakpointsWanted,
+  isBreakpointRejection,
+  markBreakpointsRejected,
+  placeConversationBreakpoints,
+  systemItemWithBreakpoint,
+} from './openaiPromptCache.js';
 import { nativeItems, responsesSummaries, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import {
@@ -75,6 +84,8 @@ const RESPONSES_TRANSLATED_METADATA_KEYS = [
   'max_tokens',
   'max_completion_tokens',
   'max_output_tokens',
+  // Not a wire param: `false` turns the GPT-5.6+ cache breakpoints off (openaiPromptCache.ts).
+  'prompt_cache_breakpoints',
 ];
 
 export default class OpenAIExecutor extends BaseExecutor {
@@ -116,8 +127,6 @@ export default class OpenAIExecutor extends BaseExecutor {
    * Returns: { message: { role, content, tool_calls }, usage: { input_tokens, output_tokens } }
    */
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
-    // Automatic prefix caching: system parts (systemContent.ts) go out as the one joined string, stable prefix first.
-    messages = withFlatSystemMessages(messages);
     // Reasoning-family models (o1/o3/o4, gpt-5.x) are served over the OpenAI
     // Responses API (/v1/responses), not Chat Completions. Chat Completions
     // rejects the combination that matters most for these models — function
@@ -130,6 +139,10 @@ export default class OpenAIExecutor extends BaseExecutor {
     if (isReasoningFamilyModel(this.model)) {
       return this.#invokeResponses(messages, options);
     }
+    // Automatic prefix caching: system parts (systemContent.ts) go out as the one joined string, stable prefix first.
+    // Every GPT-5.6+ model is in the reasoning family and goes to Responses above (which handles system parts and the
+    // cache breakpoints itself, openaiPromptCache.ts), so no breakpoints are placed on Chat Completions.
+    messages = withFlatSystemMessages(messages);
 
     // Build request parameters
     const params: any = {
@@ -189,7 +202,7 @@ export default class OpenAIExecutor extends BaseExecutor {
 
     // Format response to match expected structure
     const usageTyped = response.usage as typeof response.usage & {
-      prompt_tokens_details?: { cached_tokens?: number };
+      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
     };
     // OpenAI's prompt_tokens INCLUDES the cached tokens (cached_tokens is a
     // subset of prompt_tokens), unlike Anthropic where input_tokens excludes
@@ -199,12 +212,12 @@ export default class OpenAIExecutor extends BaseExecutor {
     // (input + cache_read + cache_creation), and cost is the sum of disjoint
     // buckets — so cache reads must not also live inside input_tokens or they
     // get charged twice.
-    const cachedTokens = usageTyped?.prompt_tokens_details?.cached_tokens ?? 0;
     // Streaming usage rides the final chunk (stream_options.include_usage). Real
     // OpenAI always sends it; guard so an OpenAI-compatible endpoint that omits
     // it degrades to zeros rather than crashing the run.
     const promptTokens = response.usage?.prompt_tokens ?? 0;
     const completionTokens = response.usage?.completion_tokens ?? 0;
+    const cacheBuckets = openaiCacheBuckets(promptTokens, usageTyped?.prompt_tokens_details);
     return {
       message: {
         role: message.role as Message['role'],
@@ -212,10 +225,8 @@ export default class OpenAIExecutor extends BaseExecutor {
         tool_calls: this.#extractToolCalls(message.tool_calls)
       },
       usage: {
-        input_tokens: Math.max(0, promptTokens - cachedTokens),
+        ...cacheBuckets,
         output_tokens: completionTokens,
-        cache_read_input_tokens: cachedTokens,
-        cache_creation_input_tokens: 0
       }
     };
   }
@@ -228,18 +239,38 @@ export default class OpenAIExecutor extends BaseExecutor {
    * shape (an `output[]` of items instead of `choices[0].message`) differ.
    */
   async #invokeResponses(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
-    const params = this.#buildResponsesRequest(messages, options);
+    const metadata = (this.primaryModelConfig as any).metadata || {};
+    const endpoint = String(this.client.baseURL ?? '');
+    const breakpoints = breakpointsWanted(this.provider, this.model, metadata, endpoint);
+    let params = this.#buildResponsesRequest(messages, options, breakpoints);
+    let response;
+    try {
+      response = await this.#streamResponses(params, options);
+    } catch (err) {
+      // A deployment or API that cannot take breakpoints (Provisioned PTU-M, an older API) answers 400. Retry this
+      // request once without them; only when that succeeds were they the cause, and they stay off for a while (logged at warn).
+      // Any other 400 fails the retry the same way and that error is thrown.
+      if (!breakpoints || !isBreakpointRejection(err)) throw err;
+      params = this.#buildResponsesRequest(messages, options, false);
+      response = await this.#streamResponses(params, options);
+      markBreakpointsRejected(this.provider, this.model, endpoint);
+    }
 
+    return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };
+  }
+
+  async #streamResponses(params: Record<string, any>, options: InvokeOptions): Promise<any> {
     this.log('[OpenAIExecutor] Invoking (responses):', {
       model: params.model,
       effort: params.reasoning?.effort,
       tools: params.tools?.length || 0,
+      cacheMode: params.prompt_cache_options?.mode,
     });
 
     // Streamed, folded back into the terminal Response object (see
     // consumeOpenAIResponsesStream). The idle timer is bumped on every event;
     // a mid-stream failure discards the partial and retries the whole prompt.
-    const response = await streamWithRetry(
+    return await streamWithRetry(
       async (guard) => {
         const stream = await this.client.responses.create(
           { ...params, stream: true } as any,
@@ -253,8 +284,6 @@ export default class OpenAIExecutor extends BaseExecutor {
         log: (m) => this.log(m),
       }
     );
-
-    return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };
   }
 
   /**
@@ -269,12 +298,13 @@ export default class OpenAIExecutor extends BaseExecutor {
    *   max_tokens / *_completion_ → max_output_tokens
    *   temperature/top_p/…        → dropped (rejected by the reasoning family)
    */
-  #buildResponsesRequest(messages: Message[], options: InvokeOptions): Record<string, any> {
+  #buildResponsesRequest(messages: Message[], options: InvokeOptions, breakpoints = false): Record<string, any> {
     const metadata = (this.primaryModelConfig as any).metadata || {};
 
     const params: Record<string, any> = {
       model: this.model,
-      input: this.#formatResponsesInput(messages),
+      // `breakpoints`: GPT-5.6+ explicit cache breakpoints (openaiPromptCache.ts).
+      input: this.#formatResponsesInput(messages, breakpoints ? { cacheOn: !options.disableCache } : null),
       // Stateless: we replay the full conversation on every turn, so there's no
       // reason to have OpenAI persist server-side response state.
       store: false,
@@ -310,6 +340,13 @@ export default class OpenAIExecutor extends BaseExecutor {
       params.tool_choice = this.#formatResponsesToolChoice(options.tool_choice);
     }
 
+    // Only our breakpoints read and write (openaiPromptCache.ts): implicit mode would add a billed write on the
+    // per-turn note. A developer-set prompt_cache_options (metadata passthrough above) wins.
+    // With no breakpoint placed (an empty system message under disableCache) nothing is sent: implicit, as before.
+    if (breakpoints && params.prompt_cache_options == null && breakpointIndexes(params.input).length > 0) {
+      params.prompt_cache_options = { mode: 'explicit' };
+    }
+
     return params;
   }
 
@@ -319,56 +356,60 @@ export default class OpenAIExecutor extends BaseExecutor {
    * `function_call_output` items keyed by `call_id`, rather than Chat
    * Completions' assistant `tool_calls` array + `role:'tool'` messages.
    */
-  #formatResponsesInput(messages: Message[]): any[] {
-    const input: any[] = [];
+  #formatResponsesInput(messages: Message[], cache: { cacheOn: boolean } | null = null): any[] {
+    if (!cache) return withFlatSystemMessages(messages).flatMap(msg => this.#responsesItems(msg));
+    // The last leading system message carries the static-prefix breakpoint; any other system message is flattened.
+    let lead = -1;
+    while (messages[lead + 1]?.role === 'system') lead++;
+    const flat = withFlatSystemMessages(messages);
+    const groups = messages.map((msg, i) => (i === lead ? [systemItemWithBreakpoint(msg)] : this.#responsesItems(flat[i])));
+    return placeConversationBreakpoints(messages, groups, cache);
+  }
 
-    for (const msg of messages) {
-      const replay = nativeItems(msg, this.provider, this.model, 'openai-responses');
-      if (replay) {
-        // The native output already contains text/functions in their original order.
-        // Canonical fields are for routing/display, not a second replay source.
-        input.push(...replay);
-        continue;
-      }
-
-      // Tool result → function_call_output, referenced by the originating
-      // tool call's id. `output` must be a JSON string.
-      if (msg.role === 'tool') {
-        input.push({
-          type: 'function_call_output',
-          call_id: msg.tool_call_id,
-          output:
-            typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
-        });
-        continue;
-      }
-
-      // Assistant turn that made tool calls: emit any text first, then one
-      // function_call item per call so a later function_call_output can bind to
-      // its call_id.
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        if (msg.content) {
-          input.push({ role: 'assistant', content: this.#formatResponsesContent(msg.content, 'assistant') });
-        }
-        for (const tc of msg.tool_calls) {
-          input.push({
-            type: 'function_call',
-            call_id: tc.id,
-            name: tc.name,
-            arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
-          });
-        }
-        continue;
-      }
-
-      // Plain message (system/user/assistant text or multimodal parts).
-      input.push({
-        role: msg.role,
-        content: this.#formatResponsesContent(msg.content, msg.role),
-      });
+  /** One canonical message → its Responses `input` items, in order. */
+  #responsesItems(msg: Message): any[] {
+    const replay = nativeItems(msg, this.provider, this.model, 'openai-responses');
+    if (replay) {
+      // The native output already contains text/functions in their original order.
+      // Canonical fields are for routing/display, not a second replay source.
+      return replay;
     }
 
-    return input;
+    // Tool result → function_call_output, referenced by the originating
+    // tool call's id. `output` is a JSON string (the breakpoint pass may turn it into an input_text array).
+    if (msg.role === 'tool') {
+      return [{
+        type: 'function_call_output',
+        call_id: msg.tool_call_id,
+        output:
+          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
+      }];
+    }
+
+    // Assistant turn that made tool calls: emit any text first, then one
+    // function_call item per call so a later function_call_output can bind to
+    // its call_id.
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      const items: any[] = [];
+      if (msg.content) {
+        items.push({ role: 'assistant', content: this.#formatResponsesContent(msg.content, 'assistant') });
+      }
+      for (const tc of msg.tool_calls) {
+        items.push({
+          type: 'function_call',
+          call_id: tc.id,
+          name: tc.name,
+          arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
+        });
+      }
+      return items;
+    }
+
+    // Plain message (system/user/assistant text or multimodal parts).
+    return [{
+      role: msg.role,
+      content: this.#formatResponsesContent(msg.content, msg.role),
+    }];
   }
 
   /**
@@ -472,8 +513,8 @@ export default class OpenAIExecutor extends BaseExecutor {
     // cached_tokens is a subset), like Chat Completions' prompt_tokens. Subtract
     // it out so the four usage buckets stay disjoint across providers.
     const usage = response?.usage ?? {};
-    const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
     const inputTokens = usage.input_tokens ?? 0;
+    const cacheBuckets = openaiCacheBuckets(inputTokens, usage.input_tokens_details);
     const outputTokens = usage.output_tokens ?? 0;
     const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
 
@@ -486,10 +527,8 @@ export default class OpenAIExecutor extends BaseExecutor {
         ...(responsesSummaries(response?.output ?? []).length ? { reasoningSummary: responsesSummaries(response.output) } : {}),
       },
       usage: {
-        input_tokens: Math.max(0, inputTokens - cachedTokens),
+        ...cacheBuckets,
         output_tokens: outputTokens,
-        cache_read_input_tokens: cachedTokens,
-        cache_creation_input_tokens: 0,
         ...(typeof reasoningTokens === 'number' ? { reasoning_output_tokens: reasoningTokens } : {}),
       },
     };

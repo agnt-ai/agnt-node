@@ -30,6 +30,15 @@
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
+import { openaiCacheBuckets } from './openaiCacheUsage.js';
+import {
+  breakpointIndexes,
+  breakpointsWanted,
+  isBreakpointRejection,
+  markBreakpointsRejected,
+  placeConversationBreakpoints,
+  systemItemWithBreakpoint,
+} from './openaiPromptCache.js';
 import { nativeItems, responsesSummaries, requestReasoningConfig } from './nativeState.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import {
@@ -78,6 +87,8 @@ const RESPONSES_TRANSLATED_METADATA_KEYS = [
   'max_tokens',
   'max_completion_tokens',
   'max_output_tokens',
+  // Not a wire param: `false` turns the GPT-5.6+ cache breakpoints off (openaiPromptCache.ts).
+  'prompt_cache_breakpoints',
 ];
 
 export default class AzureFoundryExecutor extends BaseExecutor {
@@ -149,15 +160,18 @@ export default class AzureFoundryExecutor extends BaseExecutor {
    * Returns: { message: { role, content, tool_calls }, usage: {...disjoint buckets} }
    */
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
-    // Automatic prefix caching: system parts (systemContent.ts) go out as the one joined string, stable prefix first.
-    messages = withFlatSystemMessages(messages);
     // Reasoning-family models (gpt-5.x, gpt-6.x) only answer tool calls +
     // reasoning_effort on the Responses API — identical restriction to
     // direct OpenAI (see openai.ts). The Model Inference API (`/models`) has
-    // no Responses equivalent, so this only applies in v1 mode.
+    // no Responses equivalent, so this only applies in v1 mode. The Responses
+    // path handles system parts itself (GPT-5.6+ breakpoints, openaiPromptCache.ts).
     if (this.isV1Api && isReasoningFamilyModel(this.model)) {
       return this.#invokeResponses(messages, options);
     }
+    // Automatic prefix caching: system parts (systemContent.ts) go out as the one joined string, stable prefix first.
+    // No GPT-5.6+ model reaches Chat Completions here (the reasoning family is routed to Responses above, and only the
+    // v1 endpoint serves it), so no cache breakpoints are placed on this path.
+    messages = withFlatSystemMessages(messages);
 
     const params: any = {
       model: this.model,
@@ -212,10 +226,10 @@ export default class AzureFoundryExecutor extends BaseExecutor {
     // four usage buckets disjoint across providers (otherwise a cache read
     // gets billed twice — once as input, once as read).
     const usageTyped = response.usage as typeof response.usage & {
-      prompt_tokens_details?: { cached_tokens?: number };
+      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
     };
-    const cachedTokens = usageTyped?.prompt_tokens_details?.cached_tokens ?? 0;
     const promptTokens = response.usage?.prompt_tokens ?? 0;
+    const cacheBuckets = openaiCacheBuckets(promptTokens, usageTyped?.prompt_tokens_details);
     const completionTokens = response.usage?.completion_tokens ?? 0;
 
     const toolCalls = this.#extractToolCalls(message.tool_calls);
@@ -228,10 +242,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
         tool_calls: toolCalls,
       },
       usage: {
-        input_tokens: Math.max(0, promptTokens - cachedTokens),
+        ...cacheBuckets,
         output_tokens: completionTokens,
-        cache_read_input_tokens: cachedTokens,
-        cache_creation_input_tokens: 0,
       },
     };
   }
@@ -396,15 +408,35 @@ export default class AzureFoundryExecutor extends BaseExecutor {
    * differ.
    */
   async #invokeResponses(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
-    const params = this.#buildResponsesRequest(messages, options);
+    const metadata = (this.primaryModelConfig as any).metadata || {};
+    const endpoint = String(this.client.baseURL ?? '');
+    const breakpoints = breakpointsWanted(this.provider, this.model, metadata, endpoint);
+    let params = this.#buildResponsesRequest(messages, options, breakpoints);
+    let response;
+    try {
+      response = await this.#streamResponses(params, options);
+    } catch (err) {
+      // A deployment or API that cannot take breakpoints (Provisioned PTU-M, an older API) answers 400. Retry this
+      // request once without them; only when that succeeds were they the cause, and they stay off for a while (logged at warn).
+      // Any other 400 fails the retry the same way and that error is thrown.
+      if (!breakpoints || !isBreakpointRejection(err)) throw err;
+      params = this.#buildResponsesRequest(messages, options, false);
+      response = await this.#streamResponses(params, options);
+      markBreakpointsRejected(this.provider, this.model, endpoint);
+    }
 
+    return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };
+  }
+
+  async #streamResponses(params: Record<string, any>, options: InvokeOptions): Promise<any> {
     this.log('[AzureFoundryExecutor] Invoking (responses):', {
       model: params.model,
       effort: params.reasoning?.effort,
       tools: params.tools?.length || 0,
+      cacheMode: params.prompt_cache_options?.mode,
     });
 
-    const response = await streamWithRetry(
+    return await streamWithRetry(
       async (guard) => {
         const stream = await this.client.responses.create(
           { ...params, stream: true } as any,
@@ -418,18 +450,17 @@ export default class AzureFoundryExecutor extends BaseExecutor {
         log: (m) => this.log(m),
       }
     );
-
-    return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };
   }
 
   /** Build the `/responses` request from canonical messages + invoke options.
-   *  See openai.ts's identical method for the full rationale. */
-  #buildResponsesRequest(messages: Message[], options: InvokeOptions): Record<string, any> {
+   *  See openai.ts's identical method for the full rationale. `breakpoints`: place GPT-5.6+ explicit cache
+   *  breakpoints (openaiPromptCache.ts). */
+  #buildResponsesRequest(messages: Message[], options: InvokeOptions, breakpoints = false): Record<string, any> {
     const metadata = (this.primaryModelConfig as any).metadata || {};
 
     const params: Record<string, any> = {
       model: this.model,
-      input: this.#formatResponsesInput(messages),
+      input: this.#formatResponsesInput(messages, breakpoints ? { cacheOn: !options.disableCache } : null),
       store: false,
     };
 
@@ -459,54 +490,65 @@ export default class AzureFoundryExecutor extends BaseExecutor {
       params.tool_choice = this.#formatResponsesToolChoice(options.tool_choice);
     }
 
+    // Only our breakpoints read and write (openaiPromptCache.ts): implicit mode would add a billed write on the
+    // per-turn note. A developer-set prompt_cache_options (metadata passthrough above) wins.
+    // With no breakpoint placed (an empty system message under disableCache) nothing is sent: implicit, as before.
+    if (breakpoints && params.prompt_cache_options == null && breakpointIndexes(params.input).length > 0) {
+      params.prompt_cache_options = { mode: 'explicit' };
+    }
+
     return params;
   }
 
-  /** Canonical messages → Responses `input` items. */
-  #formatResponsesInput(messages: Message[]): any[] {
-    const input: any[] = [];
+  /** Canonical messages → Responses `input` items. With `cache`, the GPT-5.6+ breakpoints are placed. */
+  #formatResponsesInput(messages: Message[], cache: { cacheOn: boolean } | null = null): any[] {
+    if (!cache) return withFlatSystemMessages(messages).flatMap(msg => this.#responsesItems(msg));
+    // The last leading system message carries the static-prefix breakpoint; any other system message is flattened.
+    let lead = -1;
+    while (messages[lead + 1]?.role === 'system') lead++;
+    const flat = withFlatSystemMessages(messages);
+    const groups = messages.map((msg, i) => (i === lead ? [systemItemWithBreakpoint(msg)] : this.#responsesItems(flat[i])));
+    return placeConversationBreakpoints(messages, groups, cache);
+  }
 
-    for (const msg of messages) {
-      const replay = nativeItems(msg, this.provider, this.model, 'openai-responses');
-      if (replay) {
-        // The native output already contains text/functions in their original order.
-        // Canonical fields are for routing/display, not a second replay source.
-        input.push(...replay);
-        continue;
-      }
-
-      if (msg.role === 'tool') {
-        input.push({
-          type: 'function_call_output',
-          call_id: msg.tool_call_id,
-          output:
-            typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
-        });
-        continue;
-      }
-
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        if (msg.content) {
-          input.push({ role: 'assistant', content: this.#formatResponsesContent(msg.content, 'assistant') });
-        }
-        for (const tc of msg.tool_calls) {
-          input.push({
-            type: 'function_call',
-            call_id: tc.id,
-            name: tc.name,
-            arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
-          });
-        }
-        continue;
-      }
-
-      input.push({
-        role: msg.role,
-        content: this.#formatResponsesContent(msg.content, msg.role),
-      });
+  /** One canonical message → its Responses `input` items, in order. */
+  #responsesItems(msg: Message): any[] {
+    const replay = nativeItems(msg, this.provider, this.model, 'openai-responses');
+    if (replay) {
+      // The native output already contains text/functions in their original order.
+      // Canonical fields are for routing/display, not a second replay source.
+      return replay;
     }
 
-    return input;
+    if (msg.role === 'tool') {
+      return [{
+        type: 'function_call_output',
+        call_id: msg.tool_call_id,
+        output:
+          typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content ?? ''),
+      }];
+    }
+
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      const items: any[] = [];
+      if (msg.content) {
+        items.push({ role: 'assistant', content: this.#formatResponsesContent(msg.content, 'assistant') });
+      }
+      for (const tc of msg.tool_calls) {
+        items.push({
+          type: 'function_call',
+          call_id: tc.id,
+          name: tc.name,
+          arguments: typeof tc.args === 'string' ? tc.args : JSON.stringify(tc.args ?? {}),
+        });
+      }
+      return items;
+    }
+
+    return [{
+      role: msg.role,
+      content: this.#formatResponsesContent(msg.content, msg.role),
+    }];
   }
 
   /** Normalize message content for a Responses input item. */
@@ -586,8 +628,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
     }
 
     const usage = response?.usage ?? {};
-    const cachedTokens = usage.input_tokens_details?.cached_tokens ?? 0;
     const inputTokens = usage.input_tokens ?? 0;
+    const cacheBuckets = openaiCacheBuckets(inputTokens, usage.input_tokens_details);
     const outputTokens = usage.output_tokens ?? 0;
     const reasoningTokens = usage.output_tokens_details?.reasoning_tokens;
 
@@ -600,10 +642,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
         ...(responsesSummaries(response?.output ?? []).length ? { reasoningSummary: responsesSummaries(response.output) } : {}),
       },
       usage: {
-        input_tokens: Math.max(0, inputTokens - cachedTokens),
+        ...cacheBuckets,
         output_tokens: outputTokens,
-        cache_read_input_tokens: cachedTokens,
-        cache_creation_input_tokens: 0,
         ...(typeof reasoningTokens === 'number' ? { reasoning_output_tokens: reasoningTokens } : {}),
       },
     };

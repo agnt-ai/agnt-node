@@ -217,6 +217,21 @@ blank line (the same text as one string), stable prefix first, which is what aut
 system message is unchanged. `SYSTEM_CACHE_BOUNDARY_SUPPORT` (exported, `1`) tells a caller this version understands
 the parts.
 
+## OpenAI / Azure GPT-5.6+ cache breakpoints
+
+The GPT-5.6 and later families cache only at breakpoints. On the Responses path (OpenAI and Azure Foundry v1) the
+executor sends `prompt_cache_options: { mode: 'explicit' }` and places `prompt_cache_breakpoint` on: the marked
+`cacheBoundary` system part (or the whole system message), the newest stable item of the request, and the same position
+before every earlier assistant turn (where earlier requests put theirs, so this one can read them). Trailing messages
+flagged `releaseAfterRead` (per-turn notes) stay after the tail breakpoint. A `function_call_output` that carries one is
+sent as an `input_text` array. `disableCache` keeps only the system breakpoint. Older models get neither parameter.
+At most 48 breakpoints go out (the system one and the newest tails), inside the 50 the service reads. Blank items are
+never marked; a request left with no breakpoint is sent without `prompt_cache_options` (implicit).
+`metadata.prompt_cache_breakpoints: false` turns this off for a model. A 400 on a request carrying breakpoints is
+retried once without them; when that retry succeeds (a Provisioned deployment, an API without breakpoints) they stay off
+for that model for 15 minutes, logged at warn. A missing catalog write rate bills cache writes at the input rate. `PROMPT_CACHE_BREAKPOINT_SUPPORT` (exported,
+`1`) tells a caller this version places them. Cache writes are reported as `cache_creation_input_tokens`.
+
 ## Failure results
 
 A failed `execute()` returns `{ ok: false, error, failure }`. `error` is the message string (unchanged);

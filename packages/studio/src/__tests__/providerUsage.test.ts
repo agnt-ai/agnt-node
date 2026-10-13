@@ -214,6 +214,25 @@ describe('OpenAIExecutor usage normalization', () => {
     expect(usage.input_tokens).toBe(0);
     expect(usage.cache_read_input_tokens).toBe(250);
   });
+
+  it('reports GPT-5.6+ cache_write_tokens as cache creation, out of input (disjoint buckets)', async () => {
+    openaiReturns({
+      choices: [{ message: { role: 'assistant', content: 'hi' } }],
+      usage: {
+        prompt_tokens: 10_000,
+        completion_tokens: 5,
+        prompt_tokens_details: { cached_tokens: 6_000, cache_write_tokens: 3_500 },
+      },
+    });
+
+    const ex = new OpenAIExecutor(makeConfig('openai', 'gpt-4o', { openai: { apiKey: 'k' } }));
+    const { usage } = await ex.invoke([{ role: 'user', content: 'hi' }]);
+
+    expect(usage.input_tokens).toBe(500);
+    expect(usage.cache_read_input_tokens).toBe(6_000);
+    expect(usage.cache_creation_input_tokens).toBe(3_500);
+    expect(usage.input_tokens! + usage.cache_read_input_tokens! + usage.cache_creation_input_tokens!).toBe(10_000);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
