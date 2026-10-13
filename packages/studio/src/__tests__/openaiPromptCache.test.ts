@@ -201,12 +201,12 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureFoundryExecutor
     expect(responsesCreate.mock.lastCall![0].prompt_cache_options).toEqual({ mode: 'implicit', ttl: '30m' });
   });
 
-  it('a 400 naming the parameters retries once without them and stops sending them for that model', async () => {
+  it('a 400 that goes away without breakpoints turns them off for that model; the request still succeeds', async () => {
     let n = 0;
     responsesCreate.mockImplementation(async (params: any) => {
       n += 1;
       if (params.prompt_cache_options) {
-        const err: any = new Error("400 Unknown parameter: 'prompt_cache_options'.");
+        const err: any = new Error("400 Invalid value for 'input[1].output': expected a string.");
         err.status = 400;
         throw err;
       }
@@ -221,9 +221,19 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureFoundryExecutor
     expect(responsesCreate.mock.calls[2][0].prompt_cache_options).toBeUndefined();
   });
 
-  it('any other 400 is not retried', async () => {
+  it('a 400 that persists without breakpoints is thrown and leaves them on', async () => {
     responsesCreate.mockImplementation(async () => { const err: any = new Error('400 Invalid tool schema'); err.status = 400; throw err; });
-    await expect(new Executor(config(provider, 'gpt-6.1-sol')).invoke([{ role: 'user', content: 'hi' }])).rejects.toThrow('Invalid tool schema');
+    const ex = new Executor(config(provider, 'gpt-6.1-sol'));
+    await expect(ex.invoke([{ role: 'user', content: 'hi' }])).rejects.toThrow('Invalid tool schema');
+    expect(responsesCreate).toHaveBeenCalledTimes(2);
+    stubToolTurns();
+    await ex.invoke([{ role: 'user', content: 'again' }]);
+    expect(responsesCreate.mock.lastCall![0].prompt_cache_options).toEqual({ mode: 'explicit' });
+  });
+
+  it('a non-400 failure is not retried here', async () => {
+    responsesCreate.mockImplementation(async () => { const err: any = new Error('401 bad key'); err.status = 401; throw err; });
+    await expect(new Executor(config(provider, 'gpt-6.1-sol')).invoke([{ role: 'user', content: 'hi' }])).rejects.toThrow('bad key');
     expect(responsesCreate).toHaveBeenCalledTimes(1);
   });
 

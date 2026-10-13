@@ -37,8 +37,8 @@
  * read; nothing request-specific is written.
  *
  * Models before GPT-5.6 reject both parameters with a 400 and are never given them. A Provisioned (PTU-M) Azure
- * deployment does not support breakpoints either; a 400 that names these parameters turns them off for that
- * provider + model in this process and the request is retried once without them (see the providers).
+ * deployment does not support breakpoints either: a 400 on a request carrying them is retried once without them,
+ * and when that retry succeeds they stay off for that provider + endpoint + model in this process (see the providers).
  */
 import type { Message } from '../types.js';
 import { SYSTEM_PART_SEPARATOR } from './systemContent.js';
@@ -70,12 +70,12 @@ export function markBreakpointsRejected(provider: string, model: string, endpoin
 /** Test seam. */
 export function resetBreakpointRejections(): void { rejected.clear(); }
 
-/** A 400 whose message names the breakpoint parameters (typed status first; the text only picks which 400). */
+/** A 400 (typed status) on a request that carried breakpoints. Whether the breakpoints caused it is decided by
+ *  retrying once without them: only a retry that then succeeds turns them off (markBreakpointsRejected). Not judged
+ *  from the message text, which may name the parameter, the array `output` form, or neither. */
 export function isBreakpointRejection(err: any): boolean {
   const status = err?.status ?? err?.statusCode ?? err?.response?.status;
-  if (status !== 400) return false;
-  const text = `${err?.message ?? ''} ${err?.error?.message ?? ''} ${err?.param ?? err?.error?.param ?? ''}`;
-  return /prompt_cache_(?:breakpoint|options)/i.test(text);
+  return status === 400;
 }
 
 /** Whether a Responses request for this model should carry breakpoints (family, kill switch, earlier rejection). */

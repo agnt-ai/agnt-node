@@ -415,13 +415,14 @@ export default class AzureFoundryExecutor extends BaseExecutor {
     try {
       response = await this.#streamResponses(params, options);
     } catch (err) {
-      // A deployment that cannot take breakpoints (Provisioned PTU-M, an older API) answers 400 naming them: stop
-      // sending them for this deployment and retry this request once with automatic caching.
+      // A deployment or API that cannot take breakpoints (Provisioned PTU-M, an older API) answers 400. Retry this
+      // request once without them; only when that succeeds were they the cause, and they stay off for this model.
+      // Any other 400 fails the retry the same way and that error is thrown.
       if (!breakpoints || !isBreakpointRejection(err)) throw err;
-      markBreakpointsRejected(this.provider, this.model, endpoint);
-      this.log(`[AzureFoundryExecutor] prompt cache breakpoints rejected for ${this.model}; retrying without them`);
       params = this.#buildResponsesRequest(messages, options, false);
       response = await this.#streamResponses(params, options);
+      markBreakpointsRejected(this.provider, this.model, endpoint);
+      this.log(`[AzureFoundryExecutor] request with prompt cache breakpoints got a 400 that went away without them; breakpoints off for ${this.model}`);
     }
 
     return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };

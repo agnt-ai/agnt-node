@@ -225,8 +225,9 @@ executor sends `prompt_cache_options: { mode: 'explicit' }` and places `prompt_c
 before every earlier assistant turn (where earlier requests put theirs, so this one can read them). Trailing messages
 flagged `releaseAfterRead` (per-turn notes) stay after the tail breakpoint. A `function_call_output` that carries one is
 sent as an `input_text` array. `disableCache` keeps only the system breakpoint. Older models get neither parameter.
-`metadata.prompt_cache_breakpoints: false` turns this off for a model; a 400 naming the parameters (a Provisioned
-deployment) turns it off for that model in the process and retries once. `PROMPT_CACHE_BREAKPOINT_SUPPORT` (exported,
+`metadata.prompt_cache_breakpoints: false` turns this off for a model. A 400 on a request carrying breakpoints is
+retried once without them; when that retry succeeds (a Provisioned deployment, an API without breakpoints) they stay off
+for that model in the process. `PROMPT_CACHE_BREAKPOINT_SUPPORT` (exported,
 `1`) tells a caller this version places them. Cache writes are reported as `cache_creation_input_tokens`.
 
 ## Failure results
