@@ -317,7 +317,7 @@ describe('calculateCost — cache-aware, provider-agnostic', () => {
     expect(cost).toBeCloseTo(22.05, 6);
   });
 
-  it('a null cache rate contributes 0 (OpenAI-style: no cache-creation charge)', () => {
+  it('a null write rate bills writes at the input rate (no premium, never free)', () => {
     const ex = exWith({
       provider: 'openai',
       name: 'gpt-4o',
@@ -331,11 +331,11 @@ describe('calculateCost — cache-aware, provider-agnostic', () => {
       { input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 },
       0
     );
-    // 2.5 (input) + 0 (creation null) + 1.25 (read) = 3.75
-    expect(cost).toBeCloseTo(3.75, 6);
+    // 2.5 (input) + 2.5 (creation null → input rate) + 1.25 (read) = 6.25
+    expect(cost).toBeCloseTo(6.25, 6);
   });
 
-  it('both cache rates null/undefined ⇒ cache buckets contribute 0', () => {
+  it('both cache rates null ⇒ reads contribute 0, writes bill at the input rate', () => {
     const ex = exWith({
       provider: 'google',
       name: 'gemini-2.0',
@@ -349,8 +349,8 @@ describe('calculateCost — cache-aware, provider-agnostic', () => {
       { input_tokens: 2_000_000, cache_creation_input_tokens: 5_000_000, cache_read_input_tokens: 9_000_000 },
       500_000
     );
-    // only input + output: 2*1 + 0.5*4 = 4
-    expect(cost).toBeCloseTo(4, 6);
+    // input 2*1 + writes 5*1 (input rate) + output 0.5*4 = 9
+    expect(cost).toBeCloseTo(9, 6);
   });
 
   it('numeric input form prices input + output only (no cache)', () => {
@@ -361,14 +361,14 @@ describe('calculateCost — cache-aware, provider-agnostic', () => {
   });
 
   it('does not apply Anthropic cache multipliers when catalog cache rates are absent', () => {
-    // No modelPricing at all → input/output safety defaults (3/15) apply,
-    // but cache rates must be 0, NOT inRate*1.25 / inRate*0.10.
+    // No modelPricing at all → input/output safety defaults (3/15) apply; a
+    // write bills at that input rate (1x, NOT inRate*1.25) and a read at 0.
     const ex = exWith(undefined);
     const cost = ex.testCalculateCost(
       { input_tokens: 0, cache_creation_input_tokens: 1_000_000, cache_read_input_tokens: 1_000_000 },
       0
     );
-    expect(cost).toBeCloseTo(0, 6);
+    expect(cost).toBeCloseTo(3, 6);
   });
 });
 

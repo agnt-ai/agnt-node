@@ -32,6 +32,7 @@ import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
 import { openaiCacheBuckets } from './openaiCacheUsage.js';
 import {
+  breakpointIndexes,
   breakpointsWanted,
   isBreakpointRejection,
   markBreakpointsRejected,
@@ -416,13 +417,12 @@ export default class AzureFoundryExecutor extends BaseExecutor {
       response = await this.#streamResponses(params, options);
     } catch (err) {
       // A deployment or API that cannot take breakpoints (Provisioned PTU-M, an older API) answers 400. Retry this
-      // request once without them; only when that succeeds were they the cause, and they stay off for this model.
+      // request once without them; only when that succeeds were they the cause, and they stay off for a while (logged at warn).
       // Any other 400 fails the retry the same way and that error is thrown.
       if (!breakpoints || !isBreakpointRejection(err)) throw err;
       params = this.#buildResponsesRequest(messages, options, false);
       response = await this.#streamResponses(params, options);
       markBreakpointsRejected(this.provider, this.model, endpoint);
-      this.log(`[AzureFoundryExecutor] request with prompt cache breakpoints got a 400 that went away without them; breakpoints off for ${this.model}`);
     }
 
     return { ...this.#formatResponsesResult(response), reasoningConfig: requestReasoningConfig(this.provider, this.model, params) };
@@ -492,7 +492,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
 
     // Only our breakpoints read and write (openaiPromptCache.ts): implicit mode would add a billed write on the
     // per-turn note. A developer-set prompt_cache_options (metadata passthrough above) wins.
-    if (breakpoints && params.prompt_cache_options == null) {
+    // With no breakpoint placed (an empty system message under disableCache) nothing is sent: implicit, as before.
+    if (breakpoints && params.prompt_cache_options == null && breakpointIndexes(params.input).length > 0) {
       params.prompt_cache_options = { mode: 'explicit' };
     }
 

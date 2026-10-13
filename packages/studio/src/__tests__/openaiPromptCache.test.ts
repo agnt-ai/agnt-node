@@ -21,6 +21,7 @@ import OpenAIExecutor from '../providers/openai.js';
 import AzureFoundryExecutor from '../providers/azureFoundry.js';
 import {
   breakpointIndexes, placeConversationBreakpoints, resetBreakpointRejections, supportsPromptCacheBreakpoints, PROMPT_CACHE_BREAKPOINT_SUPPORT,
+  MAX_BREAKPOINTS, BREAKPOINT_REJECTION_TTL_MS, breakpointsRejected, markBreakpointsRejected, systemItemWithBreakpoint,
 } from '../providers/openaiPromptCache.js';
 import { SYSTEM_PART_SEPARATOR } from '../providers/systemContent.js';
 import * as pkg from '../index.js';
@@ -221,6 +222,63 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureFoundryExecutor
     expect(responsesCreate.mock.calls[2][0].prompt_cache_options).toBeUndefined();
   });
 
+  it('the off state after a 400 expires and is logged at warn with provider and model', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      markBreakpointsRejected(provider, 'gpt-6.1-sol', 'https://res.services.ai.azure.com/openai/v1', 1_000);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toMatch(new RegExp(`provider=${provider} model=gpt-6\\.1-sol endpoint=res\\.services\\.ai\\.azure\\.com`));
+      expect(breakpointsRejected(provider, 'gpt-6.1-sol', 'https://res.services.ai.azure.com/openai/v1', 1_000 + BREAKPOINT_REJECTION_TTL_MS - 1)).toBe(true);
+      expect(breakpointsRejected(provider, 'gpt-6.1-sol', 'https://res.services.ai.azure.com/openai/v1', 1_000 + BREAKPOINT_REJECTION_TTL_MS)).toBe(false);
+      expect(breakpointsRejected(provider, 'gpt-6.1-sol', 'https://res.services.ai.azure.com/openai/v1', 1_000)).toBe(false);
+      expect(breakpointsRejected(provider, 'gpt-6-luna', 'https://res.services.ai.azure.com/openai/v1', 1_000)).toBe(false);
+    } finally { warn.mockRestore(); }
+  });
+
+  it('a 70-turn run keeps at most 48 breakpoints: the static system one and the newest tails', async () => {
+    stubToolTurns();
+    const sent = await runLoop(new Executor(config(provider, 'gpt-6.1-sol')), 70);
+    for (const input of sent) expect(breakpointIndexes(input).length).toBeLessThanOrEqual(MAX_BREAKPOINTS);
+    const input = sent.at(-1)!;
+    const bps = breakpointIndexes(input);
+    expect(bps).toHaveLength(MAX_BREAKPOINTS);
+    expect(bps[0]).toBe(0); // the static system part is kept, inside the latest 50 the service reads
+    expect(bps.at(-1)).toBe(input.length - 2); // the tail
+    const prev = sent.at(-2)!.slice(0, -1);
+    expect(bps).toContain(prev.length - 1); // the previous request's tail: this turn reads it
+  });
+
+  it('never marks or creates an empty block: a blank tail falls back to the previous stable item', async () => {
+    stubToolTurns();
+    const ex = new Executor(config(provider, 'gpt-6.1-sol'));
+    await ex.invoke([
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'go' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'a', name: 'read', args: {} }, { id: 'b', name: 'peek', args: {} }] },
+      { role: 'tool', tool_call_id: 'a', content: 'kept' },
+      { role: 'tool', tool_call_id: 'b', content: '   ' },
+      note(1),
+    ]);
+    const input = responsesCreate.mock.lastCall![0].input;
+    const outputs = input.filter((i: any) => i.type === 'function_call_output');
+    expect(outputs[1].output).toBe('   ');
+    expect(outputs[0].output).toEqual([{ type: 'input_text', text: 'kept', prompt_cache_breakpoint: BP }]);
+    expect(json(input)).not.toMatch(/"type":"input_text","text":"\s*"/);
+  });
+
+  it('disableCache with an empty system message sends no prompt_cache_options and no breakpoint', async () => {
+    stubToolTurns();
+    for (const system of [{ role: 'system', content: '' }, { role: 'system', content: [{ type: 'text', text: '  ', cacheBoundary: true }] }]) {
+      await new Executor(config(provider, 'gpt-6.1-sol')).invoke([system as Message, { role: 'user', content: 'one shot' }], { disableCache: true });
+      const params = responsesCreate.mock.lastCall![0];
+      expect(params.prompt_cache_options).toBeUndefined();
+      expect(breakpointIndexes(params.input)).toEqual([]);
+    }
+    // No system message at all: same.
+    await new Executor(config(provider, 'gpt-6.1-sol')).invoke([{ role: 'user', content: 'one shot' }], { disableCache: true });
+    expect(responsesCreate.mock.lastCall![0].prompt_cache_options).toBeUndefined();
+  });
+
   it('a 400 that persists without breakpoints is thrown and leaves them on', async () => {
     responsesCreate.mockImplementation(async () => { const err: any = new Error('400 Invalid tool schema'); err.status = 400; throw err; });
     const ex = new Executor(config(provider, 'gpt-6.1-sol'));
@@ -241,6 +299,16 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureFoundryExecutor
     stubToolTurns({ input_tokens: 50_000, output_tokens: 10, input_tokens_details: { cached_tokens: 36_036, cache_write_tokens: 12_000 } });
     const res = await new Executor(config(provider, 'gpt-6.1-sol')).invoke([{ role: 'user', content: 'hi' }]);
     expect(res.usage).toMatchObject({ input_tokens: 1_964, cache_read_input_tokens: 36_036, cache_creation_input_tokens: 12_000, output_tokens: 10 });
+  });
+});
+
+describe('systemItemWithBreakpoint (pure)', () => {
+  it('a blank boundary part moves the breakpoint to the last non-blank part; an all-blank message gets none', () => {
+    const item = systemItemWithBreakpoint({ role: 'system', content: [{ type: 'text', text: 'STATIC' }, { type: 'text', text: '   ', cacheBoundary: true }] } as Message);
+    expect(item.content[0]).toEqual({ type: 'input_text', text: 'STATIC', prompt_cache_breakpoint: BP });
+    expect(item.content[1].prompt_cache_breakpoint).toBeUndefined();
+    expect(systemItemWithBreakpoint({ role: 'system', content: [{ type: 'text', text: ' ' }] } as Message)).toEqual({ role: 'system', content: ' ' });
+    expect(systemItemWithBreakpoint({ role: 'system', content: '' })).toEqual({ role: 'system', content: '' });
   });
 });
 
