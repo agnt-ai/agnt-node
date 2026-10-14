@@ -128,6 +128,7 @@ export interface Usage {
   /** Provider-reported reasoning tokens, a subset of outputTokens. Absent when
    *  the provider does not report the detail for every completed turn. */
   reasoningTokens?: number;
+  /** Sum of each call's own price (tiers resolve per request, never on the run's total). */
   totalCostUSD: number;
 }
 
