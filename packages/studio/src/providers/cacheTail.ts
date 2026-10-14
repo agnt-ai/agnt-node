@@ -7,8 +7,10 @@
  *
  * EARLIER TAIL: the same position as seen by the previous request, i.e. the newest stable message before the last
  * assistant turn. That request wrote its entry exactly there. Anthropic finds an earlier entry from a breakpoint by
- * looking back at most 20 block positions, so a turn that appends more than that (many parallel tool calls, long
- * notes) would otherwise miss the whole conversation and re-write it. A breakpoint on a prefix that is already cached
+ * looking back at most 20 block positions (a run of consecutive tool_use blocks counts as one position, and so does a
+ * run of consecutive tool_result blocks), so a turn that appends more than 20 positions (text, thinking and tool runs
+ * across several assistant/user exchanges, long notes split into blocks) would otherwise miss the whole conversation
+ * and re-write it. A breakpoint on a prefix that is already cached
  * is a read and costs nothing extra; when it is not cached the tokens are written once either way.
  */
 import type { Message } from '../types.js';

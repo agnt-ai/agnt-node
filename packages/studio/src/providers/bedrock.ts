@@ -114,6 +114,8 @@ export default class BedrockExecutor extends BaseExecutor {
       const marks = [...new Set([tail, earlier].filter(i => i >= 0))]
         .map(i => formatted.ends[i])
         .filter((at): at is [number, number] => Array.isArray(at))
+        .map(at => outsideToolResultRun(params.messages, at))
+        .filter((at): at is [number, number] => Array.isArray(at))
         // Insert from the back so an earlier insertion never shifts a later one.
         .sort((a, b) => (b[0] - a[0]) || (b[1] - a[1]));
       const seen = new Set<string>();
@@ -483,6 +485,23 @@ export function bedrockSystemWithCachePoint(systemMessages: Message[]): any[] {
     if (i === at) blocks.push({ cachePoint: { ...CACHE_POINT } });
   });
   return blocks;
+}
+
+/**
+ * A checkpoint never goes between the toolResult blocks of one batch. When the stable tail ends mid-run (the batch's
+ * later results are `releaseAfterRead`), the mark moves back to just before the run: to the end of the message before
+ * it when the run opens its message (the assistant tool-use turn), so the cached prefix holds only stable content.
+ * Moving it forward would cache the read-once results, which change on a later turn.
+ */
+export function outsideToolResultRun(messages: any[], [m, b]: [number, number]): [number, number] | null {
+  const content = messages[m]?.content;
+  if (!Array.isArray(content)) return null;
+  if (!(b > 0 && b < content.length && content[b - 1]?.toolResult && content[b]?.toolResult)) return [m, b];
+  let start = b - 1;
+  while (start > 0 && content[start - 1]?.toolResult) start--;
+  if (start > 0) return [m, start];
+  if (m === 0 || !Array.isArray(messages[m - 1]?.content)) return null;
+  return [m - 1, messages[m - 1].content.length];
 }
 
 /** The same request with every cachePoint block removed and system text blocks rejoined as one. */

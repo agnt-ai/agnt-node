@@ -45,10 +45,11 @@ export interface PromptCacheCapability {
 
 const AUTOMATIC: PromptCacheCapability = { mechanism: 'automatic', affinityKey: null, billsWrites: false };
 
-/** Bedrock model ids that carry explicit Claude checkpoints (any inference-profile prefix or ARN), minus the old
- *  Claude models Bedrock never cached. */
+/** Bedrock model ids that carry explicit Claude checkpoints (any inference-profile prefix or ARN), minus the Claude
+ *  models whose Bedrock prompt caching is unsupported or still Preview (Claude 3 / 3.5 Sonnet incl. v2 / 3.5 Haiku /
+ *  Instant / v2); those keep Bedrock's implicit caching. */
 const BEDROCK_CLAUDE = /(^|[.:/])anthropic\.claude-/i;
-const BEDROCK_CLAUDE_UNCACHED = /anthropic\.claude-(?:3-(?:opus|sonnet|haiku)-|3-5-haiku-|instant|v2)/i;
+const BEDROCK_CLAUDE_UNCACHED = /anthropic\.claude-(?:3-(?:opus|sonnet|haiku)-|3-5-(?:haiku|sonnet)-|instant|v2)/i;
 
 export function bedrockTakesCachePoints(model: string | undefined | null): boolean {
   const m = String(model ?? '');

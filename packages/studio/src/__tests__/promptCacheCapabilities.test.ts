@@ -68,6 +68,8 @@ describe('capability table', () => {
     expect(bedrockTakesCachePoints('arn:aws:bedrock:us-east-2:1:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0')).toBe(true);
     expect(bedrockTakesCachePoints('anthropic.claude-3-opus-20240229-v1:0')).toBe(false);
     expect(bedrockTakesCachePoints('anthropic.claude-3-5-haiku-20241022-v1:0')).toBe(false);
+    expect(bedrockTakesCachePoints('anthropic.claude-3-5-sonnet-20241022-v2:0')).toBe(false); // Preview on Bedrock
+    expect(bedrockTakesCachePoints('anthropic.claude-3-7-sonnet-20250219-v1:0')).toBe(true);
     expect(bedrockTakesCachePoints('amazon.nova-pro-v1:0')).toBe(false);
   });
 

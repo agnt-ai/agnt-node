@@ -90,13 +90,29 @@ describe('Bedrock Claude cache checkpoints', () => {
     expect(b.messages[upTo].content.slice(0, at + 1)).toEqual(a.messages[upTo].content.slice(0, at + 1));
   });
 
-  it('parallel tool results share one message; the tail checkpoint goes after the last stable result', async () => {
-    const msgs = conversation(1, 3);
+  it('a parallel batch whose last result is read-once: no checkpoint inside the toolResult run; it moves to before the run', async () => {
+    const msgs = conversation(2, 3);
+    // turn 2's batch: c2_0, c2_1, c2_2 and a read-once result, then the note
     msgs.splice(msgs.length - 1, 0, { role: 'tool', tool_call_id: 'late', content: 'read once', releaseAfterRead: true });
     await makeExecutor().invoke(msgs, { tools: TOOLS });
     const p = sent();
-    const results = p.messages[2].content;
-    expect(results.map((b: any) => (b.cachePoint ? 'CP' : b.toolResult?.toolUseId ?? b.text))).toEqual(['c1_0', 'c1_1', 'c1_2', 'CP', 'late', 'clock 1']);
+    // messages: [0]user [1]asst(turn 1) [2]results(turn 1) [3]asst(turn 2) [4]results(turn 2) + late + note
+    const shape = (m: any) => m.content.map((b: any) => (b.cachePoint ? 'CP' : b.toolResult?.toolUseId ?? b.toolUse?.toolUseId ?? b.text));
+    expect(shape(p.messages[4])).toEqual(['c2_0', 'c2_1', 'c2_2', 'late', 'clock 2']);
+    expect(shape(p.messages[3])).toEqual(['c2_0', 'c2_1', 'c2_2', 'CP']); // the tail mark, at the end of the assistant turn
+    expect(shape(p.messages[2])).toEqual(['c1_0', 'c1_1', 'c1_2', 'CP']); // the previous tail: a whole run, untouched
+    for (const m of p.messages) {
+      const c = m.content;
+      for (let i = 1; i + 1 < c.length; i++) expect(Boolean(c[i].cachePoint && c[i - 1].toolResult && c[i + 1].toolResult)).toBe(false);
+    }
+  });
+
+  it('a checkpoint that would split a run that does not open its message moves to just before the run', async () => {
+    const { outsideToolResultRun } = await import('../bedrock.js');
+    const msgs = [{ role: 'user', content: [{ text: 'a' }, { toolResult: { toolUseId: 'x' } }, { toolResult: { toolUseId: 'y' } }] }];
+    expect(outsideToolResultRun(msgs, [0, 2])).toEqual([0, 1]);
+    expect(outsideToolResultRun(msgs, [0, 3])).toEqual([0, 3]);
+    expect(outsideToolResultRun([{ role: 'user', content: [{ toolResult: {} }, { toolResult: {} }] }], [0, 1])).toBeNull();
   });
 
   it('string system prompt: the checkpoint goes after it', async () => {
@@ -105,13 +121,14 @@ describe('Bedrock Claude cache checkpoints', () => {
     expect(points(sent())).toEqual(['system:1', 'm0:1']);
   });
 
-  it('no checkpoints: disableCache, the kill switch, Nova, DeepSeek, an old Claude', async () => {
+  it('no checkpoints: disableCache, the kill switch, Nova, DeepSeek, an old or Preview-caching Claude', async () => {
     await makeExecutor().invoke(conversation(2), { tools: TOOLS, disableCache: true });
     await makeExecutor(CLAUDE, { prompt_cache_breakpoints: false }).invoke(conversation(2), { tools: TOOLS });
     await makeExecutor('amazon.nova-pro-v1:0').invoke(conversation(2), { tools: TOOLS });
     await makeExecutor('deepseek.v3.2').invoke(conversation(2), { tools: TOOLS });
     await makeExecutor('anthropic.claude-3-opus-20240229-v1:0').invoke(conversation(2), { tools: TOOLS });
-    for (let i = 0; i < 5; i++) {
+    await makeExecutor('anthropic.claude-3-5-sonnet-20241022-v2:0').invoke(conversation(2), { tools: TOOLS }); // Preview on Bedrock
+    for (let i = 0; i < 6; i++) {
       expect(points(sent(i))).toEqual([]);
       expect(sent(i).system).toEqual([{ text: 'STATIC\n\nPER RUN' }]);
     }
