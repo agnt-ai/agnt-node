@@ -18,6 +18,7 @@ export { default as AnthropicExecutor } from './providers/anthropic.js';
 export { anthropicSupportsForcedTools } from './providers/anthropicThinking.js';
 export { SYSTEM_CACHE_BOUNDARY_SUPPORT, systemText } from './providers/systemContent.js';
 export { PROMPT_CACHE_BREAKPOINT_SUPPORT, supportsPromptCacheBreakpoints } from './providers/openaiPromptCache.js';
+export { PROMPT_CACHE_CAPABILITIES_SUPPORT, promptCacheCapability, takesPromptCacheKey, bedrockTakesCachePoints, type PromptCacheCapability, type PromptCacheMechanism } from './providers/promptCacheCapabilities.js';
 export { default as OpenAIExecutor } from './providers/openai.js';
 export { default as BedrockExecutor } from './providers/bedrock.js';
 export { default as OpenAICompatibleExecutor, OPENAI_COMPATIBLE_BASE_URLS, OPENAI_COMPATIBLE_PROVIDERS } from './providers/openaiCompatible.js';

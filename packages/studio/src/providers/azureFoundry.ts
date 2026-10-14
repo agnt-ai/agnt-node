@@ -31,6 +31,7 @@ import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
 import { openaiCacheBuckets } from './openaiCacheUsage.js';
+import { withoutCacheControlMetadata } from './promptCacheCapabilities.js';
 import {
   breakpointIndexes,
   breakpointsWanted,
@@ -178,7 +179,9 @@ export default class AzureFoundryExecutor extends BaseExecutor {
       messages: this.#formatMessages(messages),
     };
 
-    Object.assign(params, this.#extractProviderParams());
+    // Chat Completions here serves the non-OpenAI models Foundry hosts (automatic caching where they cache at all):
+    // neither caching metadata key is a wire param for them.
+    Object.assign(params, withoutCacheControlMetadata(this.#extractProviderParams()));
 
     if (options.tools && options.tools.length > 0) {
       params.tools = options.tools.map(t => this.#formatTool(t));
