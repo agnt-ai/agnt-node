@@ -462,6 +462,92 @@ describe('calculateCost — token-range pricing tiers', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Run cost across a tool loop: the SUM of each call's own price
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('run totalCostUSD — tiers resolve per call, never on the run total', () => {
+  // Shaped like a gpt-6.x row: base below 272K input, a cliff tier above it.
+  const tieredPricing = {
+    provider: 'openai', name: 'gpt-6-tiered', currency: 'USD',
+    inputTokensPer1M: 2, outputTokensPer1M: 10, cacheReadTokensPer1M: 0.1,
+    tiers: [{ thresholdInputTokens: 272_000, inputTokensPer1M: 4, outputTokensPer1M: 15, cacheReadTokensPer1M: 0.2 }],
+  };
+
+  function loopManifest() {
+    return makeManifest({
+      spec: {
+        routingStrategy: 'fallback', enableToolCalls: true, variables: [], files: [],
+        models: [{ provider: 'openai', model: 'gpt-6-tiered' }], dependencies: [],
+        tools: [{ name: 'noop', description: 'noop', parameters: { type: 'object', properties: {} } }],
+      },
+    });
+  }
+
+  // Each entry is one LLM call's usage; every call but the last asks for
+  // `noop`, the last one finishes the run.
+  async function runTurns(turnUsages: Array<Record<string, number>>) {
+    const hooks = new HookRegistry();
+    const traceCosts: number[] = [];
+    hooks.register('llm_output', async (payload: any) => { traceCosts.push(payload.cost); });
+    const ex = new TestExecutor(makeConfig(loopManifest(), {
+      modelPricing: tieredPricing as any, logLevel: 'silent', hooks,
+      toolRouter: { noop: { execute: async () => ({ completed: true }) } },
+    }));
+    ex.hasToolCalls.mockImplementation((m: any) => Array.isArray(m?.tool_calls) && m.tool_calls.length > 0);
+    turnUsages.forEach((usage, i) => {
+      const last = i === turnUsages.length - 1;
+      ex.invoke.mockResolvedValueOnce({
+        message: {
+          role: 'assistant', content: '',
+          tool_calls: [last
+            ? { id: `t${i}`, name: 'finish_agent_run', args: { message: 'done' } }
+            : { id: `t${i}`, name: 'noop', args: {} }],
+        },
+        usage,
+      });
+    });
+    const result = await ex.execute();
+    const perCall = turnUsages.map(u => ex.testCalculateCost(u, u.output_tokens || 0));
+    return { result, traceCosts, perCall, ex };
+  }
+
+  it('two calls of ~140K that cross 272K only TOGETHER bill at base rates (the bug: cliff rate on 280K)', async () => {
+    const turn = { input_tokens: 10_000, cache_read_input_tokens: 130_000, output_tokens: 2_000 };
+    const { result, traceCosts } = await runTurns([turn, turn]);
+    // per call: 0.01*2 + 0.13*0.1 + 0.002*10 = 0.053; run = 0.106
+    expect(result.usage.totalCostUSD).toBeCloseTo(0.106, 9);
+    // The old repricing of the summed buckets (280K input > 272K) gave
+    // 0.02*4 + 0.26*0.2 + 0.004*15 = 0.192.
+    expect(result.usage.totalCostUSD).not.toBeCloseTo(0.192, 3);
+    // Tokens still aggregate across the run.
+    expect(result.usage.inputTokens).toBe(280_000);
+    expect(result.usage.cacheReadTokens).toBe(260_000);
+    expect(result.usage.outputTokens).toBe(4_000);
+    // The run total equals the sum of the per-turn costs sent to the trace.
+    expect(traceCosts).toHaveLength(2);
+    expect(result.usage.totalCostUSD).toBeCloseTo(traceCosts[0] + traceCosts[1], 12);
+  });
+
+  it('a single call that is itself above 272K still bills at the tier rate', async () => {
+    const small = { input_tokens: 10_000, output_tokens: 1_000 };
+    const big = { input_tokens: 20_000, cache_read_input_tokens: 280_000, output_tokens: 1_000 };
+    const { result, perCall } = await runTurns([small, big]);
+    // small: 0.01*2 + 0.001*10 = 0.03; big (300K > 272K): 0.02*4 + 0.28*0.2 + 0.001*15 = 0.151
+    expect(perCall[0]).toBeCloseTo(0.03, 9);
+    expect(perCall[1]).toBeCloseTo(0.151, 9);
+    expect(result.usage.totalCostUSD).toBeCloseTo(0.181, 9);
+  });
+
+  it('a run entirely under 272K is unchanged (sum of calls = repricing the sum)', async () => {
+    const turn = { input_tokens: 30_000, cache_read_input_tokens: 20_000, output_tokens: 500 };
+    const { result } = await runTurns([turn, turn, turn]);
+    // 150K total, never crosses: identical to one base-rate price on the sum.
+    // 0.09*2 + 0.06*0.1 + 0.0015*10 = 0.201
+    expect(result.usage.totalCostUSD).toBeCloseTo(0.201, 9);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // normalizeToolArgs — schema-aware stringified arg coercion (direct-call boundary)
 // ─────────────────────────────────────────────────────────────────────────────
 

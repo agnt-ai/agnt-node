@@ -744,7 +744,8 @@ export default class BaseExecutor {
   // Rates are resolved PER CALL via resolvePricingTier() above, keyed off this
   // call's own total input tokens — see that method for why. Accepts either a
   // raw provider usage object (disjoint buckets) or, for the simple no-cache
-  // call sites, plain input/output token counts.
+  // call sites, plain input/output token counts. Never pass it a SUM of
+  // several calls: a run's cost is the sum of its calls' costs (runToolLoop).
   protected calculateCost(
     inputTokensOrUsage: number | { input_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number },
     outputTokens: number
@@ -995,17 +996,17 @@ export default class BaseExecutor {
       } else if (turnReasoningTokens === undefined) {
         usage.reasoningTokens = undefined;
       }
-      // Recalculate with per-type breakdown so cache rates are applied correctly
-      usage.totalCostUSD = this.calculateCost({
-        input_tokens:                usage.inputTokens - usage.cacheCreationTokens - usage.cacheReadTokens,
-        cache_creation_input_tokens: usage.cacheCreationTokens,
-        cache_read_input_tokens:     usage.cacheReadTokens,
-      }, usage.outputTokens);
+      // The run's cost is the SUM of each call's own price. Providers apply
+      // token-range tiers per request, so repricing the run's summed buckets
+      // would bill every turn at the cliff rate once the run's cumulative
+      // input crossed a threshold (2x on long gpt-6.x runs). Price this call
+      // alone, then add it.
+      const turnCost = this.calculateCost(result.usage ?? 0, result.usage?.output_tokens || 0);
+      usage.totalCostUSD += turnCost;
 
       message = result.message;
       this.messages.push(message);
 
-      const turnCost = this.calculateCost(result.usage ?? 0, result.usage?.output_tokens || 0);
       await this.sendTurnTrace(result.usage || { input_tokens: 0, output_tokens: 0 }, turnDuration, turnCost, result.reasoningConfig, result.inputTransformations, result.prefixBindingRecovery);
     }
 
