@@ -117,7 +117,8 @@ describe('BedrockExecutor — Converse stopReason crosses the package boundary',
     expect(result.message.role).toBe('assistant');
     expect(result.message.content).toBe('hello');
     expect(result.message.tool_calls).toEqual([]);
-    expect(result.usage).toEqual({ input_tokens: 1234, output_tokens: 56 });
+    // Cache buckets are always reported now (bedrockPromptCache.test.ts); 0 when Converse reports none.
+    expect(result.usage).toEqual({ input_tokens: 1234, output_tokens: 56, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
   });
 
   it('still surfaces stopReason alongside tool calls', async () => {
