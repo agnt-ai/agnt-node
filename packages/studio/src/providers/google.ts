@@ -503,7 +503,8 @@ export default class GoogleExecutor extends BaseExecutor {
    */
   #extractProviderParams(): Record<string, any> {
     const metadata = (this.primaryModelConfig as any).metadata || {};
-    const { displayName, reasoning_effort, ...providerParams } = metadata;
+    // Gemini caches implicitly (promptCacheCapabilities.ts): the caching metadata keys are never model config.
+    const { displayName, reasoning_effort, prompt_cache_breakpoints: _off, prompt_cache_key: _key, ...providerParams } = metadata;
     const existing = providerParams.generationConfig?.thinkingConfig;
     const mapped = geminiThinkingConfig(this.model, reasoning_effort, existing);
     if (mapped) providerParams.generationConfig = { ...(providerParams.generationConfig || {}), thinkingConfig: mapped };

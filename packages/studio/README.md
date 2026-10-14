@@ -232,6 +232,24 @@ retried once without them; when that retry succeeds (a Provisioned deployment, a
 for that model for 15 minutes, logged at warn. A missing catalog write rate bills cache writes at the input rate. `PROMPT_CACHE_BREAKPOINT_SUPPORT` (exported,
 `1`) tells a caller this version places them. Cache writes are reported as `cache_creation_input_tokens`.
 
+## Prompt caching on every provider
+
+`promptCacheCapability(provider, model)` (exported, with `takesPromptCacheKey` and `PROMPT_CACHE_CAPABILITIES_SUPPORT`)
+says how a provider caches, so a caller never decides it by model id:
+
+| Provider | Mechanism | What this SDK does | Lane key (`metadata.prompt_cache_key`) |
+|---|---|---|---|
+| anthropic | explicit `cache_control`, max 4, 5 min | tools, system static part, stable tail, previous request's tail | not sent |
+| bedrock (Claude) | Converse `cachePoint`, max 4 | same four positions; a 400 retries once without them (then off 15 min) | not sent |
+| bedrock (Nova, others) | implicit | nothing placed; reads/writes reported | not sent |
+| openai / azureFoundry GPT-5.6+ | explicit breakpoints, 30 min | see above | body (`prompt_cache_key`) |
+| openai older models | automatic prefix | stable prefix only | body |
+| google | Gemini implicit | stable prefix only; `cachedContentTokenCount` reported | not sent |
+| OpenAI-compatible | automatic prefix | stable prefix only; cached tokens read from any spelling | xAI: `x-grok-conv-id` header; Mistral: body; others: not sent |
+
+`metadata.prompt_cache_breakpoints: false` is never sent to any provider. On Anthropic it drops the previous-tail mark
+only; on Bedrock it drops every checkpoint; on OpenAI/Azure it turns the GPT-5.6+ breakpoints off.
+
 ## Failure results
 
 A failed `execute()` returns `{ ok: false, error, failure }`. `error` is the message string (unchanged);

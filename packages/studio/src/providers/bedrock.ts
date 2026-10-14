@@ -6,7 +6,10 @@
 
 import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 import BaseExecutor from '../BaseExecutor.js';
-import { systemText } from './systemContent.js';
+import { systemText, SYSTEM_PART_SEPARATOR } from './systemContent.js';
+import { stableTailIndex, earlierTailIndex } from './cacheTail.js';
+import { bedrockTakesCachePoints, breakpointsSwitchedOff } from './promptCacheCapabilities.js';
+import { breakpointsRejected, markBreakpointsRejected } from './openaiPromptCache.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { fileToBedrockDocument } from './fileAttachment.js';
 
@@ -51,14 +54,26 @@ export default class BedrockExecutor extends BaseExecutor {
     // Extract provider-specific parameters
     const providerParams = this.#extractProviderParams();
 
+    // Prompt caching (promptCacheCapabilities.ts). Claude models take explicit Converse `cachePoint` blocks: one after
+    // the tools, one at the system prompt's static boundary, one at the conversation's stable tail and one at the
+    // previous request's tail (cacheTail.ts), 4 in all, the most Bedrock allows. Nova and every other model rely on
+    // Bedrock's implicit caching (Nova caches explicitly only within its first 20K tokens, which a long system
+    // prompt alone exceeds). One-shot callers (`disableCache`), the caller's kill switch
+    // (`prompt_cache_breakpoints: false`) and a model that rejected checkpoints in the last 15 minutes get none.
+    const cachePoints = !options.disableCache
+      && bedrockTakesCachePoints(this.model)
+      && !breakpointsSwitchedOff(providerParams)
+      && !breakpointsRejected('bedrock', this.model, this.region);
+
     // Extract system messages (Bedrock requires separate system parameter)
     const systemMessages = messages.filter(m => m.role === 'system');
-    const systemContent = systemMessages.map(m => systemText(m.content)).join('\n\n');
+    const systemContent = systemMessages.map(m => systemText(m.content)).join(SYSTEM_PART_SEPARATOR);
 
     // Build request parameters
+    const formatted = this.#formatMessages(messages);
     const params: any = {
       modelId: this.model,
-      messages: this.#formatMessages(messages),
+      messages: formatted.messages,
       inferenceConfig: {
         maxTokens: providerParams.maxTokens || providerParams.max_tokens || 4096
       }
@@ -66,7 +81,7 @@ export default class BedrockExecutor extends BaseExecutor {
 
     // Add system parameter if we have system messages
     if (systemContent) {
-      params.system = [{ text: systemContent }];
+      params.system = cachePoints ? bedrockSystemWithCachePoint(systemMessages) : [{ text: systemContent }];
     }
 
     // Add temperature if defined
@@ -89,6 +104,27 @@ export default class BedrockExecutor extends BaseExecutor {
       if (options.tool_choice && options.tool_choice !== 'auto') {
         params.toolConfig.toolChoice = this.#formatToolChoice(options.tool_choice);
       }
+      if (cachePoints) params.toolConfig.tools.push({ cachePoint: { ...CACHE_POINT } });
+    }
+
+    if (cachePoints) {
+      const conversation = messages.filter(m => m.role !== 'system');
+      const tail = stableTailIndex(conversation);
+      const earlier = earlierTailIndex(conversation);
+      const marks = [...new Set([tail, earlier].filter(i => i >= 0))]
+        .map(i => formatted.ends[i])
+        .filter((at): at is [number, number] => Array.isArray(at))
+        .map(at => outsideToolResultRun(params.messages, at))
+        .filter((at): at is [number, number] => Array.isArray(at))
+        // Insert from the back so an earlier insertion never shifts a later one.
+        .sort((a, b) => (b[0] - a[0]) || (b[1] - a[1]));
+      const seen = new Set<string>();
+      for (const [m, b] of marks) {
+        const key = `${m}:${b}`;
+        if (seen.has(key) || !params.messages[m]) continue;
+        seen.add(key);
+        params.messages[m].content.splice(b, 0, { cachePoint: { ...CACHE_POINT } });
+      }
     }
 
     this.log('[BedrockExecutor] Invoking:', {
@@ -106,8 +142,17 @@ export default class BedrockExecutor extends BaseExecutor {
     // request ran to completion and returned a normal success, which
     // invokeWithFallback would then accept and bill for work the caller had
     // already abandoned.
-    const command = new ConverseCommand(params);
-    const response = await this.client.send(command, { abortSignal: options.signal });
+    let response: any;
+    try {
+      response = await this.client.send(new ConverseCommand(params), { abortSignal: options.signal });
+    } catch (error) {
+      // A model or Region that does not take checkpoints answers 400 (ValidationException). Retry once without
+      // them; only a retry that then succeeds turns them off for this model (15 minutes, logged at warn).
+      if (!cachePoints || !isValidationError(error)) throw error;
+      const plain = stripCachePoints(params);
+      response = await this.client.send(new ConverseCommand(plain), { abortSignal: options.signal });
+      markBreakpointsRejected('bedrock', this.model, this.region);
+    }
 
     // Format response to match expected structure
     const output = response.output;
@@ -126,9 +171,14 @@ export default class BedrockExecutor extends BaseExecutor {
         content: this.#extractTextContent(message!.content),
         tool_calls: this.#extractToolCalls(message!.content)
       },
+      // Converse reports cache reads and writes beside inputTokens, which then counts only the uncached rest, so
+      // the buckets are already disjoint. Bedrock also caches implicitly with no checkpoints, so reads are read on
+      // every model (dropping them under-billed every cached token).
       usage: {
-        input_tokens: response.usage!.inputTokens!,
-        output_tokens: response.usage!.outputTokens!
+        input_tokens: response.usage?.inputTokens ?? 0,
+        output_tokens: response.usage?.outputTokens ?? 0,
+        cache_read_input_tokens: Math.max(0, Number(response.usage?.cacheReadInputTokens) || 0),
+        cache_creation_input_tokens: Math.max(0, Number(response.usage?.cacheWriteInputTokens) || 0)
       },
       ...(response.stopReason ? { stopReason: response.stopReason } : {})
     };
@@ -144,8 +194,11 @@ export default class BedrockExecutor extends BaseExecutor {
   /**
    * Format messages for Bedrock Converse API
    */
-  #formatMessages(messages: Message[]): any[] {
+  #formatMessages(messages: Message[]): { messages: any[]; ends: Array<[number, number] | null> } {
     const formatted: any[] = [];
+    // For each non-system source message: [formatted message, content index just after its last block], where a
+    // cache checkpoint for "everything up to this message" goes. Tool results share one formatted message.
+    const ends: Array<[number, number] | null> = [];
 
     for (const msg of messages) {
       // Skip system messages (handled separately in Bedrock)
@@ -185,6 +238,7 @@ export default class BedrockExecutor extends BaseExecutor {
         } else {
           formatted.push({ role: 'user', content: [toolResultBlock] });
         }
+        ends.push([formatted.length - 1, formatted[formatted.length - 1].content.length]);
         continue;
       }
 
@@ -220,13 +274,23 @@ export default class BedrockExecutor extends BaseExecutor {
         contentBlocks.push({ text: ' ' });
       }
 
+      // Converse rejects two messages of the same role in a row ("A conversation must alternate between user and
+      // assistant roles"). A per-turn note right after the tool results is exactly that, so a same-role message is
+      // appended to the previous one (after its blocks: tool results stay first).
+      const prev = formatted[formatted.length - 1];
+      if (prev && prev.role === msg.role && Array.isArray(prev.content)) {
+        prev.content.push(...contentBlocks);
+        ends.push([formatted.length - 1, prev.content.length]);
+        continue;
+      }
       formatted.push({
         role: msg.role,
         content: contentBlocks
       });
+      ends.push([formatted.length - 1, contentBlocks.length]);
     }
 
-    return formatted;
+    return { messages: formatted, ends };
   }
 
   /**
@@ -390,3 +454,70 @@ export default class BedrockExecutor extends BaseExecutor {
     return providerParams;
   }
 }
+
+const CACHE_POINT = { type: 'default' as const };
+
+/**
+ * Converse `system` with a checkpoint at the static boundary: one text block per system part (each later block
+ * starting with the separator, so the model reads exactly the joined text), the checkpoint after the part marked
+ * `cacheBoundary` (systemContent.ts), or after the last block when none is marked.
+ */
+export function bedrockSystemWithCachePoint(systemMessages: Message[]): any[] {
+  const parts: Array<{ text: string; boundary: boolean }> = [];
+  for (const m of systemMessages) {
+    if (Array.isArray(m.content)) {
+      for (const part of m.content as any[]) {
+        const text = typeof part === 'string' ? part : typeof part?.text === 'string' ? part.text : '';
+        if (text) parts.push({ text, boundary: part?.cacheBoundary === true });
+      }
+    } else {
+      const text = systemText(m.content);
+      if (text) parts.push({ text, boundary: false });
+    }
+  }
+  if (!parts.length) return [];
+  let at = -1;
+  for (let i = 0; i < parts.length; i++) if (parts[i].boundary) at = i;
+  if (at < 0) at = parts.length - 1;
+  const blocks: any[] = [];
+  parts.forEach((p, i) => {
+    blocks.push({ text: i === 0 ? p.text : SYSTEM_PART_SEPARATOR + p.text });
+    if (i === at) blocks.push({ cachePoint: { ...CACHE_POINT } });
+  });
+  return blocks;
+}
+
+/**
+ * A checkpoint never goes between the toolResult blocks of one batch. When the stable tail ends mid-run (the batch's
+ * later results are `releaseAfterRead`), the mark moves back to just before the run: to the end of the message before
+ * it when the run opens its message (the assistant tool-use turn), so the cached prefix holds only stable content.
+ * Moving it forward would cache the read-once results, which change on a later turn.
+ */
+export function outsideToolResultRun(messages: any[], [m, b]: [number, number]): [number, number] | null {
+  const content = messages[m]?.content;
+  if (!Array.isArray(content)) return null;
+  if (!(b > 0 && b < content.length && content[b - 1]?.toolResult && content[b]?.toolResult)) return [m, b];
+  let start = b - 1;
+  while (start > 0 && content[start - 1]?.toolResult) start--;
+  if (start > 0) return [m, start];
+  if (m === 0 || !Array.isArray(messages[m - 1]?.content)) return null;
+  return [m - 1, messages[m - 1].content.length];
+}
+
+/** The same request with every cachePoint block removed and system text blocks rejoined as one. */
+function stripCachePoints(params: any): any {
+  const out = { ...params };
+  if (Array.isArray(params.system)) {
+    const text = params.system.filter((b: any) => typeof b?.text === 'string').map((b: any) => b.text).join('');
+    out.system = text ? [{ text }] : undefined;
+    if (!out.system) delete out.system;
+  }
+  if (params.toolConfig?.tools) out.toolConfig = { ...params.toolConfig, tools: params.toolConfig.tools.filter((t: any) => !t?.cachePoint) };
+  out.messages = params.messages.map((m: any) => ({ ...m, content: m.content.filter((b: any) => !b?.cachePoint) }));
+  return out;
+}
+
+function isValidationError(error: any): boolean {
+  return error?.name === 'ValidationException' || error?.$metadata?.httpStatusCode === 400;
+}
+

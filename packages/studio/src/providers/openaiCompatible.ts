@@ -30,6 +30,7 @@
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
+import { promptCacheCapability, withoutCacheControlMetadata } from './promptCacheCapabilities.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { streamWithRetry, consumeOpenAIStream, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
 
@@ -43,6 +44,8 @@ export const OPENAI_COMPATIBLE_BASE_URLS: Record<string, string> = {
   // International endpoint. China-region accounts need api.moonshot.cn/v1 —
   // override via credentials.moonshot.baseURL (see resolution order below).
   moonshot:  'https://api.moonshot.ai/v1',
+  // xAI, Groq, Mistral and other hosts are reached with metadata.baseURL; their caching rules (automatic, plus a
+  // lane key for xAI and Mistral) are keyed by provider name in promptCacheCapabilities.ts.
 };
 
 /**
@@ -132,8 +135,14 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
       messages: this.#formatMessages(messages),
     };
 
-    // Pass through provider-specific params from model config (temperature, top_p, …).
-    Object.assign(params, this.#extractProviderParams());
+    // Pass through provider-specific params from model config (temperature, top_p, …). The lane key
+    // (`prompt_cache_key`) goes where this host takes one: in the body (Mistral), as the `x-grok-conv-id` routing
+    // header (xAI), nowhere for the rest, where an unknown body field could be rejected.
+    const providerParams = this.#extractProviderParams();
+    const cacheKey = typeof providerParams.prompt_cache_key === 'string' ? providerParams.prompt_cache_key : null;
+    const affinity = promptCacheCapability(this.providerName, this.model).affinityKey;
+    Object.assign(params, withoutCacheControlMetadata(providerParams, { keepKey: affinity === 'body' }));
+    const requestHeaders = cacheKey && affinity === 'header' ? { 'x-grok-conv-id': cacheKey } : undefined;
 
     // Reasoning-only models (Kimi K3) reject legacy sampling params and want
     // max_completion_tokens instead of max_tokens — strip/translate in place
@@ -178,7 +187,7 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
       async (guard) => {
         const stream = await this.client.chat.completions.create(
           { ...params, stream: true, stream_options: { include_usage: true } },
-          { signal: guard.signal }
+          { signal: guard.signal, ...(requestHeaders ? { headers: requestHeaders } : {}) }
         );
         return await consumeOpenAIStream(stream as any, () => guard.bump());
       },
@@ -216,11 +225,12 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
       prompt_cache_hit_tokens?: number;
       prompt_tokens_details?: { cached_tokens?: number };
     };
+    // The first spelling that reports a hit, in the order above: a host can send a zeroed nested field beside the
+    // real top-level count, and the first PRESENT field then read every hit as a miss.
     const cachedTokens =
-      usageTyped?.prompt_tokens_details?.cached_tokens ??
-      usageTyped?.cached_tokens ??
-      usageTyped?.prompt_cache_hit_tokens ??
-      0;
+      [usageTyped?.prompt_tokens_details?.cached_tokens, usageTyped?.cached_tokens, usageTyped?.prompt_cache_hit_tokens]
+        .map(v => Number(v) || 0)
+        .find(v => v > 0) ?? 0;
     // Streamed usage rides the final include_usage chunk. Real OpenAI/Together
     // send it, but guard so a host that omits it yields 0s instead of a crash
     // on response.usage!.  If a host silently drops usage, cost → 0 and the

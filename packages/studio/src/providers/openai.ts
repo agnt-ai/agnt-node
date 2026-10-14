@@ -8,6 +8,7 @@ import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
 import { openaiCacheBuckets } from './openaiCacheUsage.js';
+import { withoutCacheControlMetadata } from './promptCacheCapabilities.js';
 import {
   breakpointIndexes,
   breakpointsWanted,
@@ -152,7 +153,9 @@ export default class OpenAIExecutor extends BaseExecutor {
 
     // Add all provider-specific parameters from model config
     // This passes through any OpenAI API params: temperature, top_p, reasoning, etc.
-    const providerParams = this.#extractProviderParams();
+    // `prompt_cache_breakpoints` is the caller's switch for this SDK's breakpoints, never a wire param; the lane key
+    // (`prompt_cache_key`) is a Chat Completions param on every OpenAI model and stays.
+    const providerParams = withoutCacheControlMetadata(this.#extractProviderParams(), { keepKey: true });
     Object.assign(params, providerParams);
 
     // Add tools if provided

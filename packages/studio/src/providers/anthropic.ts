@@ -12,6 +12,8 @@ import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '.
 import { fileToAnthropicDocument } from './fileAttachment.js';
 import { streamWithRetry, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
 import { anthropicSystem } from './systemContent.js';
+import { stableTailIndex, earlierTailIndex } from './cacheTail.js';
+import { breakpointsSwitchedOff } from './promptCacheCapabilities.js';
 
 /**
  * Claude's "reasoning family" — the current models whose reasoning is driven by
@@ -109,6 +111,9 @@ export default class AnthropicExecutor extends BaseExecutor {
   async invoke(messages: Message[], options: InvokeOptions = {}): Promise<InvokeResult> {
     // Extract provider-specific parameters from model config
     const providerParams = this.#extractProviderParams();
+    const earlierTailOff = breakpointsSwitchedOff(providerParams);
+    delete providerParams.prompt_cache_breakpoints;
+    delete providerParams.prompt_cache_key;
     // Beta controls belong in the header, not in the Messages body. This is
     // opt-in observation/policy: a header alone does not change mismatch handling.
     const beta = providerParams.anthropic_beta;
@@ -182,15 +187,21 @@ export default class AnthropicExecutor extends BaseExecutor {
       }
     }
 
-    // Message-tail breakpoint at the last NON-(trailing-read-once) message.
-    // #formatMessages drops system messages and is 1:1 (same order) with the
-    // non-system source messages, so the formatted array aligns with them.
+    // Message-tail breakpoint at the last NON-(trailing-read-once) message, and a fourth one at the previous
+    // request's tail (cacheTail.ts: Anthropic looks back only 20 block positions from a breakpoint, so a turn that
+    // appends more than that would otherwise re-write the whole conversation). #formatMessages drops system
+    // messages and is 1:1 (same order) with the non-system source messages, so the formatted array aligns with
+    // them. `prompt_cache_breakpoints: false` (the caller's kill switch) drops only the earlier-tail mark; a
+    // developer-set top-level `cache_control` (automatic caching) takes a slot, so it drops that mark too.
     if (cacheOn && params.messages.length > 0) {
       const nonSystem = messages.filter(m => m.role !== 'system');
-      let k = nonSystem.length - 1;
-      while (k >= 0 && (nonSystem[k] as Message).releaseAfterRead) k--;
+      const k = stableTailIndex(nonSystem);
       if (k >= 0 && params.messages[k]) {
         this.#attachCacheControl(params.messages[k]);
+      }
+      const e = earlierTailIndex(nonSystem);
+      if (e >= 0 && e !== k && params.messages[e] && !earlierTailOff && params.cache_control == null) {
+        this.#attachCacheControl(params.messages[e]);
       }
     }
 
@@ -403,11 +414,22 @@ export default class AnthropicExecutor extends BaseExecutor {
   #attachCacheControl(msg: any): void {
     if (!msg) return;
     if (typeof msg.content === 'string') {
+      if (!msg.content) return; // an empty text block cannot carry cache_control
       msg.content = [{ type: 'text', text: msg.content, cache_control: { type: 'ephemeral' } }];
     } else if (Array.isArray(msg.content) && msg.content.length > 0) {
-      const i = msg.content.length - 1;
+      // The last block that may carry a mark: never a thinking block, never an empty text block.
+      let i = msg.content.length - 1;
+      while (i >= 0 && !this.#canCarryCacheControl(msg.content[i])) i--;
+      if (i < 0) return;
       msg.content[i] = { ...msg.content[i], cache_control: { type: 'ephemeral' } };
     }
+  }
+
+  #canCarryCacheControl(block: any): boolean {
+    if (!block || typeof block !== 'object') return false;
+    if (block.type === 'thinking' || block.type === 'redacted_thinking') return false;
+    if (block.type === 'text') return typeof block.text === 'string' && block.text !== '';
+    return true;
   }
 
   /**
