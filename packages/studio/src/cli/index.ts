@@ -7,7 +7,7 @@ import { Command } from 'commander';
 import { runInit } from './commands/init.js';
 import { runPull } from './commands/pull.js';
 import { runConfigure } from './commands/configure.js';
-import { runList, runGetTask, runGetChat } from './commands/run.js';
+import { runList, runGetTask, runGetChat, runListCalls, runGetCall } from './commands/run.js';
 import { evalSummary, evalList, evalGet } from './commands/eval.js';
 import {
   runSkillList, runSkillGet, runSkillCreate, runSkillUpdate,
@@ -88,6 +88,22 @@ runCmd
   .action(async (chatId: string, opts: { profile?: string; json?: boolean; max?: string; all?: boolean }) => {
     await runGetChat(chatId, opts);
   });
+
+runCmd.command('calls')
+  .description('List retained native live-call traces (account-level developer key)')
+  .option('--task <taskId>', 'Filter calls for one task')
+  .option('--chat <chatId>', 'Filter calls for one chat')
+  .option('--limit <n>', 'Maximum calls, up to 100', '20')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON')
+  .action(runListCalls);
+
+runCmd.command('call <callId>')
+  .description('Read a native live-call trace by call SID or session UUID (account-level developer key)')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON')
+  .option('--langsmith', 'Also resolve its exported LangSmith trace URL')
+  .action(runGetCall);
 
 const evalCmd = program
   .command('eval')

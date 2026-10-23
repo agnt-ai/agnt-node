@@ -433,3 +433,25 @@ This change is a 0.0.65 release candidate. Publish the reviewed SDK package firs
 then update the backend's exact dependency and lockfile to that published artifact,
 build/deploy it, and verify real provider traces. A locally packed tarball is for
 review/integration proof and does not establish a deployed or published version.
+
+
+### Native live-call traces
+
+With an account-level developer key and the phone-call tracing backend/gateway deployed:
+
+```sh
+agnt run calls --task <taskId> --json
+agnt run calls --chat <chatId>
+agnt run call <Twilio-CallSid-or-session-UUID> --json
+agnt run call <callId> --langsmith
+```
+
+A trace keeps the backend speaker/reasoner snapshots separately from the gateway's
+actual outgoing setup and later events, plus the final transcript, usage and ending.
+An outgoing setup proves the gateway wrote it to its socket; it does not prove the
+provider applied it. A `running` trace can mean the ending was never captured.
+Capture is bounded and flags omissions/truncation. Private-details calls withhold
+content and retain hashes. Records expire after14days; older calls cannot recover
+prompt text retroactively. LangSmith export is optional and failures are reported
+in the retained trace. These commands require the companion backend release; a404
+from an older server is not evidence that a call had no instructions.
