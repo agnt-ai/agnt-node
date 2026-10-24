@@ -218,3 +218,37 @@ export async function runGetChat(chatId: string, opts: RunGetOptions): Promise<v
     process.exit(1);
   }
 }
+
+
+export interface RunCallOptions { profile?: string; json?: boolean; task?: string; chat?: string; limit?: string; langsmith?: boolean }
+const terminalText = (value: unknown) => String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
+
+export async function runListCalls(opts: RunCallOptions): Promise<void> {
+  try {
+    const limit = Number(opts.limit || 20);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('--limit must be an integer from 1 to 100');
+    const client = await clientFor(opts.profile);
+    const result = await client.listCallTraces({ task: opts.task, chat: opts.chat, limit });
+    if (opts.json) { console.log(JSON.stringify(result, null, 2)); return; }
+    console.log(`Native live-call traces (${result.callTraces.length}):`);
+    for (const row of result.callTraces) console.log(terminalText(`${row.callId}  [${row.status}] ${row.provider} ${row.startedAt} task=${row.task || '-'} chat=${row.chat || '-'}`));
+    if (result.truncated) console.error(`Result may be truncated at ${result.limit} calls; narrow --task/--chat or raise --limit (max100).`);
+    if (!result.callTraces.length) console.log('No retained live-call traces. Older calls have no retroactive prompt capture.');
+  } catch (err: any) { console.error(err.message); process.exit(1); }
+}
+
+export async function runGetCall(callId: string, opts: RunCallOptions): Promise<void> {
+  try {
+    const client = await clientFor(opts.profile);
+    const trace = await client.getCallTrace(callId);
+    const langsmithUrl = opts.langsmith ? await client.getCallLangSmithUrl(callId) : undefined;
+    if (opts.json) { console.log(JSON.stringify({ callTrace: trace, ...(langsmithUrl ? { langsmithUrl } : {}) }, null, 2)); return; }
+    console.log(terminalText(`Call ${trace.callId} [${trace.status}] provider=${trace.provider} session=${trace._id}`));
+    console.log(terminalText(`Task: ${trace.task || '-'}  Chat: ${trace.chat || '-'}  ${trace.startedAt} → ${trace.endedAt || 'end not captured'}`));
+    console.log(`Backend snapshot (provider receipt remains unknown):\n${JSON.stringify(trace.snapshot, null, 2)}`);
+    console.log(`Gateway setup and events:\n${JSON.stringify(trace.gateway, null, 2)}`);
+    console.log(`Transcript${trace.transcriptTruncated ? ' (truncated)' : ''}:\n${JSON.stringify(trace.transcript, null, 2)}`);
+    console.log(`Usage / ending:\n${JSON.stringify({ usage: trace.usage, usageTruncated: trace.usageTruncated === true, endedReason: trace.endedReason, langsmith: trace.langsmith }, null, 2)}`);
+    if (langsmithUrl) console.log(`LangSmith: ${terminalText(langsmithUrl)}`);
+  } catch (err: any) { console.error(err.message); process.exit(1); }
+}

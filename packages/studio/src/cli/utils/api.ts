@@ -160,6 +160,22 @@ export class AgntApiClient {
     return { chats: data.chats, total: data.total };
   }
 
+  async listCallTraces(params: { task?: string; chat?: string; limit?: number } = {}): Promise<{ callTraces: Record<string, any>[]; limit: number; truncated: boolean }> {
+    const query = new URLSearchParams();
+    for (const key of ['task', 'chat', 'limit'] as const) if (params[key] !== undefined) query.set(key, String(params[key]));
+    return this.request(`/voice/call-traces${query.size ? `?${query}` : ''}`, {}, true);
+  }
+
+  async getCallTrace(callId: string): Promise<Record<string, any>> {
+    const data = await this.request<{ callTrace: Record<string, any> }>(`/voice/call-traces/${encodeURIComponent(callId)}`, {}, true);
+    return data.callTrace;
+  }
+
+  async getCallLangSmithUrl(callId: string): Promise<string> {
+    const data = await this.request<{ url: string }>(`/voice/call-traces/${encodeURIComponent(callId)}/langsmith-url`, {}, true);
+    return data.url;
+  }
+
   /**
    * GET /tasks/:taskId — task metadata (title, status, owner, account, etc.)
    */
