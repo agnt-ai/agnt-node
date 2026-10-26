@@ -177,9 +177,10 @@ export function classifyError(
   // (also when it is wrapped as a cause by an outer layer).
   const sa = findStreamAbort(err);
   if (sa) {
-    return sa.reason === 'external'
-      ? { kind: 'aborted', status, retryable: false }
-      : { kind: 'timeout', status, retryable: true };
+    if (sa.reason === 'external') return { kind: 'aborted', status, retryable: false };
+    // The caller's own wall: a timeout, but not one to retry inside it.
+    if (sa.reason === 'deadline') return { kind: 'timeout', status, retryable: false };
+    return { kind: 'timeout', status, retryable: true };
   }
 
   const names = classNames(err);

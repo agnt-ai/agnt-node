@@ -198,7 +198,7 @@ describe('execute() failure result', () => {
     ]))) as any;
     ex.invoke
       .mockRejectedValueOnce(openaiErr(429, null))
-      .mockRejectedValueOnce(new StreamAbortError('backstop', 'x'));
+      .mockRejectedValueOnce(new StreamAbortError('deadline', 'x'));
     const r = await ex.execute();
     expect(r.failure.kind).toBe('timeout');
     expect(r.failure.fallbackTrail).toEqual([
@@ -246,6 +246,11 @@ describe('classifyError — names, cause chain, ordering', () => {
     // TLS/certificate failures are deliberately left unknown
     expect(k(fetchFailed('CERT_HAS_EXPIRED'))).toBe('unknown');
     expect(k(fetchFailed('ERR_TLS_CERT_ALTNAME_INVALID'))).toBe('unknown');
+  });
+
+  it('the caller\'s deadline is a timeout that is not retryable', () => {
+    expect(classifyError(new StreamAbortError('deadline', 'x'))).toEqual({ kind: 'timeout', status: undefined, retryable: false });
+    expect(classifyError(new StreamAbortError('backstop', 'x')).retryable).toBe(true);
   });
 
   it('a StreamAbortError in the cause chain is honoured', () => {

@@ -269,7 +269,17 @@ if (!result.ok) {
   Bedrock `ThrottlingException`). Quota is checked before timeout. **Quota may be permanent**: `insufficient_quota` and
   `exceeded_current_quota_error` are `quota` with `retryable: false`.
 - `timeout`: idle/backstop stream abort, HTTP 408, timeout error class or code (Node codes are read through `.cause`,
-  so `fetch failed` TypeErrors classify). `aborted`: the caller stopped the run.
+  so `fetch failed` TypeErrors classify). The caller's own `deadlineAt` passing is a `timeout` with `retryable: false`.
+  `aborted`: the caller stopped the run.
+
+### Slow models and the caller's deadline
+
+A stream with no token for 60 s (idle) or still running at the 10-minute absolute backstop moves the turn to the next
+model in `spec.models` (by `fallbackOrder`). When a reachable model follows, a stalled model is left at its FIRST idle
+stall; only the last one retries its stall in place. Pass `deadlineAt` (epoch ms) in the executor config, or per call in
+`InvokeOptions`, when the caller has a hard wall (a worker's execution timeout): every attempt's ceiling becomes the
+smaller of the backstop and the time left, and once it passes no further attempt or fallback model is tried. A caller
+stop (`cancel()` / `signal`) stays terminal and fans out to no other model.
 - `unsupported`: HTTP 501/405/415 or an `unsupported_*`/`DeploymentNotFound` style code; also a chain member that was
   skipped in the trail because no `executorFactory` could build it.
 - `auth`: 401/403, `AuthenticationError`/`PermissionDeniedError`, AccessDenied codes (a revoked key is not a bad request).

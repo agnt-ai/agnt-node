@@ -384,3 +384,63 @@ describe('consumeOpenAIResponsesStream', () => {
     ).rejects.toThrow(/without a terminal response event/);
   });
 });
+
+describe('streamWithRetry — idleRetries and deadlineAt', () => {
+  it('idleRetries 0 leaves a stalled stream on its first stall (the executor hops instead)', async () => {
+    let attempts = 0;
+    const err = await streamWithRetry(
+      (guard) => { attempts++; return abortsOnGuard(guard); },
+      { maxRetries: 3, idleRetries: 0, idleTimeoutMs: 20, backstopMs: 10_000 }
+    ).catch((e) => e);
+    expect(attempts).toBe(1);
+    expect((err as StreamAbortError).reason).toBe('idle');
+  });
+
+  it('idleRetries does not limit retries of an ordinary retryable error', async () => {
+    let attempts = 0;
+    const out = await streamWithRetry(
+      async () => { attempts++; if (attempts < 3) throw new Error('reset'); return 'ok'; },
+      { maxRetries: 3, idleRetries: 0, isRetryable: () => true }
+    );
+    expect(out).toBe('ok');
+    expect(attempts).toBe(3);
+  });
+
+  it('the attempt ceiling is the time left before deadlineAt, reported as "deadline", never retried', async () => {
+    let attempts = 0;
+    const started = Date.now();
+    const err = await streamWithRetry(
+      (guard) => { attempts++; const t = setInterval(() => guard.bump(), 5); return abortsOnGuard(guard).finally(() => clearInterval(t)); },
+      { maxRetries: 3, idleTimeoutMs: 10_000, backstopMs: 10_000, deadlineAt: Date.now() + 40 }
+    ).catch((e) => e);
+    expect(attempts).toBe(1);
+    expect((err as StreamAbortError).reason).toBe('deadline');
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('the backstop still names the abort when it comes before the deadline', async () => {
+    const err = await streamWithRetry(
+      (guard) => abortsOnGuard(guard),
+      { maxRetries: 3, idleTimeoutMs: 10_000, backstopMs: 20, deadlineAt: Date.now() + 10_000 }
+    ).catch((e) => e);
+    expect((err as StreamAbortError).reason).toBe('backstop');
+  });
+
+  it('no attempt starts once the deadline has passed', async () => {
+    const attempt = vi.fn(async () => 'x');
+    const err = await streamWithRetry(attempt, { deadlineAt: Date.now() - 1 }).catch((e) => e);
+    expect(attempt).not.toHaveBeenCalled();
+    expect((err as StreamAbortError).reason).toBe('deadline');
+  });
+
+  it('an idle retry that would start past the deadline does not start', async () => {
+    let attempts = 0;
+    const err = await streamWithRetry(
+      (guard) => { attempts++; return abortsOnGuard(guard); },
+      { maxRetries: 3, idleTimeoutMs: 20, backstopMs: 10_000, deadlineAt: Date.now() + 30 }
+    ).catch((e) => e);
+    // First attempt stalls at 20 ms; the retry's ceiling is ~10 ms and fires as "deadline".
+    expect(attempts).toBeLessThanOrEqual(2);
+    expect((err as StreamAbortError).reason).toBe('deadline');
+  });
+});

@@ -216,6 +216,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
       },
       {
         externalSignal: options.signal,
+        deadlineAt: options.deadlineAt,
+        idleRetries: options.idleRetries,
         isRetryable: (err) => this.isRetryableError(err),
         log: (m) => this.log(m),
       }
@@ -449,6 +451,8 @@ export default class AzureFoundryExecutor extends BaseExecutor {
       },
       {
         externalSignal: options.signal,
+        deadlineAt: options.deadlineAt,
+        idleRetries: options.idleRetries,
         isRetryable: (err) => this.isRetryableError(err),
         log: (m) => this.log(m),
       }
