@@ -386,10 +386,10 @@ export default class BaseExecutor {
 
   // Provider adapters call this to classify a mid-stream failure for retry.
   protected isRetryableError(error: any): boolean {
-    // A stream that stalled (idle) or dribbled to the absolute ceiling
-    // (backstop) is a model-health signal — fall back to the next model. The
-    // caller's deadline or stop (external) is terminal: no other model either.
-    if (error instanceof StreamAbortError) return error.reason === 'idle' || error.reason === 'backstop';
+    // A stalled stream (idle) is a model-health signal — fall back to the next
+    // model. The backstop, the caller's deadline and its stop (external) are
+    // decided by isFallbackEligible / the caller, not retried here.
+    if (error instanceof StreamAbortError) return error.reason === 'idle';
     // HTTP status codes from Anthropic, OpenAI, Google, etc.
     const status = typeof error?.status === 'number' ? error.status : undefined;
     if (status !== undefined) {
@@ -430,11 +430,12 @@ export default class BaseExecutor {
    * caller's deadline (deadlineAt) having passed. Spinning up more provider
    * calls after either would ignore that signal rather than serve it.
    *
-   * A stream that dribbled to the absolute backstop DOES fall back (it used to
-   * end the turn): on 2026-10-19 one model slowed down for everyone while its
-   * backup stayed healthy, and a turn that sat out the backstop on the slow
-   * model never tried the backup. Bounding the total is the caller's
-   * deadlineAt, which lowers every attempt's ceiling to the time left.
+   * A stream that dribbled to the absolute backstop falls back when the caller
+   * passed deadlineAt (it used to end the turn): on 2026-10-19 one model slowed
+   * down for everyone while its backup stayed healthy, and a turn that sat out
+   * the backstop on the slow model never tried the backup. The deadline bounds
+   * the total, lowering every attempt's ceiling to the time left. With no
+   * deadline the backstop stays terminal, so N models cannot each spend it.
    *
    * This is intentionally a SEPARATE, broader check from isRetryableError,
    * which stays narrow (network blips, overload, rate limits) because it
@@ -470,8 +471,14 @@ export default class BaseExecutor {
    * silently disables the backup chain, which is the exact failure this
    * change exists to remove, so this carve-out stays narrow and typed.
    */
-  protected isFallbackEligible(error: any): boolean {
-    if (error instanceof StreamAbortError) return error.reason === 'idle' || error.reason === 'backstop';
+  protected isFallbackEligible(error: any, options: InvokeOptions = {}): boolean {
+    if (error instanceof StreamAbortError) {
+      if (error.reason === 'idle') return true;
+      // The backstop hops only for a caller that bounds the total (deadlineAt).
+      // Without one, N models x the 10-minute backstop is unbounded by design.
+      if (error.reason === 'backstop') return Number.isFinite(options.deadlineAt);
+      return false;
+    }
     return true;
   }
 
@@ -512,7 +519,7 @@ export default class BaseExecutor {
     // are almost always already well-formed, so this is a scan with no clone.
     messages = deepWellForm(messages);
     if (options.tools) options = { ...options, tools: deepWellForm(options.tools) };
-    if (options.deadlineAt === undefined && this.deadlineAt !== undefined) options = { ...options, deadlineAt: this.deadlineAt };
+    if (!Number.isFinite(options.deadlineAt) && this.deadlineAt !== undefined) options = { ...options, deadlineAt: this.deadlineAt };
 
     // Reset to the originally-selected primary model at the start of every
     // turn. This executor instance is reused across a multi-turn tool loop —
@@ -564,7 +571,6 @@ export default class BaseExecutor {
       if (this.deadlinePassed(options)) {
         const late = new StreamAbortError('deadline', '[BaseExecutor] deadline passed — no further model attempts');
         if (lastError) Object.assign(late, { cause: lastError });
-        failureTrail.push(trailEntry(modelConfig, late, { cancelled: false }));
         attachTrail(late, lastMember ?? modelConfig);
         throw late;
       }
@@ -635,7 +641,7 @@ export default class BaseExecutor {
         failureTrail.push(trailEntry(modelConfig, error, { cancelled: stopped }));
         if (stopped) { attachTrail(error, modelConfig); throw error; }
 
-        if (this.isFallbackEligible(error)) {
+        if (this.isFallbackEligible(error, options)) {
           this.log(`[BaseExecutor] ${modelConfig.model} failed (${error?.message ?? error}) — trying next model`);
           failures.push({ model: modelConfig.model, error });
           lastError = error;

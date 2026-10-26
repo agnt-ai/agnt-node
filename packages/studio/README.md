@@ -274,11 +274,13 @@ if (!result.ok) {
 
 ### Slow models and the caller's deadline
 
-A stream with no token for 60 s (idle) or still running at the 10-minute absolute backstop moves the turn to the next
-model in `spec.models` (by `fallbackOrder`). When a reachable model follows, a stalled model is left at its FIRST idle
+A stream with no token for 60 s (idle) moves the turn to the next model in `spec.models` (by `fallbackOrder`); one
+still running at the 10-minute absolute backstop does too when the caller passed `deadlineAt` (without one the backstop
+ends the turn, so a long chain cannot multiply it). When a reachable model follows, a stalled model is left at its FIRST idle
 stall; only the last one retries its stall in place. Pass `deadlineAt` (epoch ms) in the executor config, or per call in
 `InvokeOptions`, when the caller has a hard wall (a worker's execution timeout): every attempt's ceiling becomes the
-smaller of the backstop and the time left, and once it passes no further attempt or fallback model is tried. A caller
+smaller of the backstop and the time left, and once it passes no further attempt or fallback model is tried. Bedrock,
+which does not stream, aborts its request at the deadline too. A caller
 stop (`cancel()` / `signal`) stays terminal and fans out to no other model.
 - `unsupported`: HTTP 501/405/415 or an `unsupported_*`/`DeploymentNotFound` style code; also a chain member that was
   skipped in the trail because no `executorFactory` could build it.

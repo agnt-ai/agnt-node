@@ -25,10 +25,10 @@ export const STREAM_IDLE_TIMEOUT_MS =
 
 /** Absolute per-attempt ceiling. Only the pathological dribble case reaches it;
  *  a steadily-streaming multi-minute response never does. Never retried on the
- *  same model: the executor moves to the next model in the account's list
- *  instead. A caller with a hard wall passes `deadlineAt`, which lowers this
- *  ceiling to the time left and stops the hops once it passes. Comfortably
- *  above any legitimate single-turn duration. */
+ *  same model. A caller that passes `deadlineAt` gets the next model instead
+ *  (the deadline lowers this ceiling to the time left and stops the hops once
+ *  it passes); without one it ends the turn, so the chain cannot multiply it.
+ *  Comfortably above any legitimate single-turn duration. */
 export const STREAM_ABSOLUTE_BACKSTOP_MS =
   Number(process.env.AGNT_STREAM_BACKSTOP_MS) || 600_000;
 
@@ -40,7 +40,8 @@ export const STREAM_MAX_RETRIES = Number(process.env.AGNT_STREAM_MAX_RETRIES) ||
 export type StreamAbortReason = 'idle' | 'backstop' | 'deadline' | 'external';
 
 /** Raised when the guard aborts a stream. `reason` decides what happens next:
- *  `idle` and `backstop` are the model's fault (move to the next model);
+ *  `idle` and `backstop` are the model's fault (move to the next model; the
+ *  backstop only under a caller deadline);
  *  `deadline` (the caller's wall) and `external` (the caller's stop) are
  *  terminal. */
 export class StreamAbortError extends Error {

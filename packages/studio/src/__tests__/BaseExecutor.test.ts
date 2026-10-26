@@ -1426,10 +1426,14 @@ describe('isFallbackEligible — default to falling back, for any reason', () =>
     expect(ex().isFallbackEligible(new StreamAbortError('external', 'aborted'))).toBe(false);
   });
 
-  it('DOES fall back once a stream dribbled to its absolute ceiling — the backup may be healthy', () => {
+  it('falls back on a backstop only when the caller bounds the total with deadlineAt', () => {
     // 2026-10-19: one model slowed for everyone while its backup stayed fine.
-    // The total is bounded by the caller's deadlineAt, not by ending the turn.
-    expect(ex().isFallbackEligible(new StreamAbortError('backstop', 'hit ceiling'))).toBe(true);
+    // With a deadline the total is bounded; without one, N models x the
+    // 10-minute backstop would not be, so the backstop still ends the turn.
+    const err = new StreamAbortError('backstop', 'hit ceiling');
+    expect(ex().isFallbackEligible(err, { deadlineAt: Date.now() + 60_000 })).toBe(true);
+    expect(ex().isFallbackEligible(err)).toBe(false);
+    expect(ex().isFallbackEligible(err, { deadlineAt: NaN })).toBe(false);
   });
 
   it('does NOT fall back once the caller\'s deadline has passed', () => {
@@ -1987,7 +1991,42 @@ describe('invokeWithFallback — idle retries and deadlineAt per attempt', () =>
     expect(err.reason).toBe('deadline');
     expect(err.cause?.message).toBe('bad request');
     expect(ex.invoke).toHaveBeenCalledTimes(1);
-    expect(err.failureTrail.map((t: any) => t.model)).toEqual(['primary', 'fallback']);
+    // The trail lists only the model that was actually tried.
+    expect(err.failureTrail.map((t: any) => t.model)).toEqual(['primary']);
+  });
+
+  it('a cross-provider follower (built by executorFactory) counts, and the sub-executor gets idleRetries 0 when another follows it', async () => {
+    const manifest = makeManifest({
+      spec: { ...makeManifest().spec, models: [
+        { provider: 'anthropic', model: 'primary',  fallbackOrder: 0 },
+        { provider: 'openai',    model: 'other',    fallbackOrder: 1 },
+        { provider: 'openai',    model: 'last',     fallbackOrder: 2 },
+      ] },
+    });
+    const subInvokes: any[] = [];
+    const executorFactory = vi.fn(async (cfg: any) => ({
+      invoke: vi.fn(async (_m: any, opts: any) => {
+        subInvokes.push({ model: cfg.manifest.spec.models[0].model, opts });
+        if (subInvokes.length === 1) throw new StreamAbortError('idle', 'stalled');
+        return { message: { role: 'assistant', content: 'ok' }, usage: {} };
+      }),
+    }));
+    const ex = new TestExecutor(makeConfig(manifest, { executorFactory })) as any;
+    ex.invoke = vi.fn().mockRejectedValueOnce(new StreamAbortError('idle', 'stalled'));
+
+    const res = await ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {});
+
+    expect(res.message.content).toBe('ok');
+    expect(ex.invoke.mock.calls[0][1].idleRetries).toBe(0);
+    expect(subInvokes.map(s => [s.model, s.opts.idleRetries])).toEqual([['other', 0], ['last', undefined]]);
+  });
+
+  it('a per-call deadlineAt that is not a number does not cancel the executor-level deadline', async () => {
+    const deadlineAt = Date.now() + 60_000;
+    const ex = new TestExecutor(makeConfig(twoModels(), { deadlineAt })) as any;
+    ex.invoke = vi.fn().mockResolvedValueOnce({ message: { role: 'assistant', content: 'ok' }, usage: {} });
+    await ex.invokeWithFallback([{ role: 'user', content: 'hi' }], { deadlineAt: null });
+    expect(ex.invoke.mock.calls[0][1].deadlineAt).toBe(deadlineAt);
   });
 
   it('a deadline abort from the stream is terminal: no next model', async () => {

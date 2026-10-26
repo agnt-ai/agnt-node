@@ -6,6 +6,7 @@
 
 import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 import BaseExecutor from '../BaseExecutor.js';
+import { StreamAbortError } from './streaming.js';
 import { systemText, SYSTEM_PART_SEPARATOR } from './systemContent.js';
 import { stableTailIndex, earlierTailIndex } from './cacheTail.js';
 import { bedrockTakesCachePoints, breakpointsSwitchedOff } from './promptCacheCapabilities.js';
@@ -142,15 +143,35 @@ export default class BedrockExecutor extends BaseExecutor {
     // request ran to completion and returned a normal success, which
     // invokeWithFallback would then accept and bill for work the caller had
     // already abandoned.
+    //
+    // It also has no stream guard, so the caller's deadlineAt is applied here:
+    // the request is aborted when it passes and reported as a 'deadline' stop.
+    const leftMs = Number.isFinite(options.deadlineAt) ? (options.deadlineAt as number) - Date.now() : Infinity;
+    if (leftMs <= 0) throw new StreamAbortError('deadline', '[bedrock] deadline passed before attempt');
+    const deadlineSignal = Number.isFinite(leftMs) ? AbortSignal.timeout(leftMs) : undefined;
+    // AbortSignal.any is Node 20.3+; on an older runtime the caller's signal alone still stops it.
+    const abortSignal = !deadlineSignal ? options.signal
+      : !options.signal ? deadlineSignal
+        : typeof (AbortSignal as any).any === 'function' ? (AbortSignal as any).any([options.signal, deadlineSignal]) : options.signal;
+    const send = async (p: any) => {
+      try {
+        return await this.client.send(new ConverseCommand(p), { abortSignal });
+      } catch (error) {
+        if (deadlineSignal?.aborted && !options.signal?.aborted) {
+          throw Object.assign(new StreamAbortError('deadline', '[bedrock] deadline passed mid-request'), { cause: error });
+        }
+        throw error;
+      }
+    };
     let response: any;
     try {
-      response = await this.client.send(new ConverseCommand(params), { abortSignal: options.signal });
+      response = await send(params);
     } catch (error) {
       // A model or Region that does not take checkpoints answers 400 (ValidationException). Retry once without
       // them; only a retry that then succeeds turns them off for this model (15 minutes, logged at warn).
       if (!cachePoints || !isValidationError(error)) throw error;
       const plain = stripCachePoints(params);
-      response = await this.client.send(new ConverseCommand(plain), { abortSignal: options.signal });
+      response = await send(plain);
       markBreakpointsRejected('bedrock', this.model, this.region);
     }
 

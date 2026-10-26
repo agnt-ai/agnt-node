@@ -107,15 +107,27 @@ describe('a stalled model hands the turn to the next configured model', () => {
     expect(callsFor('only')).toBe(3);
   });
 
-  it('a stream that dribbles to the backstop moves to the next model instead of ending the turn', async () => {
+  it('under a caller deadline, a stream that dribbles to the backstop moves to the next model instead of ending the turn', async () => {
     serve({ primary: dribbling, backup: () => answer() });
-    const ex = new OpenAIExecutor(config(['primary', 'backup'])) as any;
+    const ex = new OpenAIExecutor(config(['primary', 'backup'], { deadlineAt: Date.now() + 10_000 })) as any;
 
     const res = await ex.invokeWithFallback(hi, {});
 
     expect(res.message.content).toBe('from backup');
     expect(callsFor('primary')).toBe(1);
     expect(callsFor('backup')).toBe(1);
+  });
+});
+
+describe('with no deadline the backstop still ends the turn (N models x the backstop stays bounded)', () => {
+  it('a dribbling stream with no deadline is not followed by the next model', async () => {
+    serve({ primary: dribbling, backup: () => answer() });
+    const ex = new OpenAIExecutor(config(['primary', 'backup'])) as any;
+
+    const err = await ex.invokeWithFallback(hi, {}).catch((e: any) => e);
+
+    expect(err.reason).toBe('backstop');
+    expect(callsFor('backup')).toBe(0);
   });
 });
 
