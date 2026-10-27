@@ -280,7 +280,9 @@ ends the turn, so a long chain cannot multiply it). When a reachable model follo
 stall; only the last one retries its stall in place. Pass `deadlineAt` (epoch ms) in the executor config, or per call in
 `InvokeOptions`, when the caller has a hard wall (a worker's execution timeout): every attempt's ceiling becomes the
 smaller of the backstop and the time left, and once it passes no further attempt or fallback model is tried. Bedrock,
-which does not stream, aborts its request at the deadline too. A caller
+which does not stream, aborts its request at the deadline too (on Node 18 to 20.2, which lack `AbortSignal.any`,
+Bedrock cannot combine the deadline with the caller's stop signal and does not enforce the deadline on the request; the
+executor still tries no further model once it has passed). A caller
 stop (`cancel()` / `signal`) stays terminal and fans out to no other model.
 - `unsupported`: HTTP 501/405/415 or an `unsupported_*`/`DeploymentNotFound` style code; also a chain member that was
   skipped in the trail because no `executorFactory` could build it.

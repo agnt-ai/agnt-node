@@ -119,6 +119,39 @@ describe('a stalled model hands the turn to the next configured model', () => {
   });
 });
 
+describe('a backup on another provider only counts when it can be built (credentials present)', () => {
+  // Mirrors createExecutor's factory: it throws when the provider has no credentials.
+  const factory = vi.fn(async (cfg: BaseExecutorConfig) => {
+    const provider = cfg.manifest.spec.models[0].provider;
+    if (!(cfg.credentials as any)?.[provider]) throw new Error(`credentials.${provider}.apiKey is required`);
+    return { invoke: async () => ({ message: { role: 'assistant', content: 'from backup' } }) };
+  });
+  const crossConfig = (credentials: any): BaseExecutorConfig => {
+    const base = config(['primary']);
+    base.manifest.spec.models.push({ provider: 'anthropic', model: 'backup', fallbackOrder: 1 } as any);
+    return { ...base, credentials, executorFactory: factory } as BaseExecutorConfig;
+  };
+
+  it('a backup with no credentials for its provider leaves the primary its 3 stall retries', async () => {
+    serve({ primary: stalled });
+    const ex = new OpenAIExecutor(crossConfig({ openai: { apiKey: 'k' } })) as any;
+
+    await ex.invokeWithFallback(hi, {}).catch((e: any) => e);
+
+    expect(callsFor('primary')).toBe(3);
+  });
+
+  it('a backup with credentials for its provider takes the turn at the first stall (0 retries)', async () => {
+    serve({ primary: stalled });
+    const ex = new OpenAIExecutor(crossConfig({ openai: { apiKey: 'k' }, anthropic: { apiKey: 'k2' } })) as any;
+
+    const res = await ex.invokeWithFallback(hi, {});
+
+    expect(res.message.content).toBe('from backup');
+    expect(callsFor('primary')).toBe(1);
+  });
+});
+
 describe('with no deadline the backstop still ends the turn (N models x the backstop stays bounded)', () => {
   it('a dribbling stream with no deadline is not followed by the next model', async () => {
     serve({ primary: dribbling, backup: () => answer() });

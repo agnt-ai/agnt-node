@@ -66,6 +66,31 @@ describe('Bedrock enforces deadlineAt itself', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('a fractional deadlineAt still sends the request and aborts at the deadline (no ERR_OUT_OF_RANGE)', async () => {
+    send.mockImplementation((_cmd: any, { abortSignal }: any) => new Promise((_, reject) => {
+      abortSignal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+    }));
+    const ex = new BedrockExecutor(config());
+    const err = await ex.invoke([{ role: 'user', content: 'hi' }], { deadlineAt: Date.now() + 40.5 }).catch((e: any) => e);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(StreamAbortError);
+    expect(err.reason).toBe('deadline');
+  });
+
+  it('a deadline more than ~24.8 days away does not abort the request early', async () => {
+    let seen: AbortSignal | undefined;
+    send.mockImplementation(async (_cmd: any, { abortSignal }: any) => {
+      seen = abortSignal;
+      await new Promise((r) => setTimeout(r, 30));
+      if (abortSignal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+      return { output: { message: { role: 'assistant', content: [{ text: 'ok' }] } }, stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } };
+    });
+    const ex = new BedrockExecutor(config());
+    const res = await ex.invoke([{ role: 'user', content: 'hi' }], { deadlineAt: Date.now() + 40 * 24 * 3600 * 1000 });
+    expect(seen?.aborted).toBe(false);
+    expect(res.message.content).toBe('ok');
+  });
+
   it('a caller stop is still a caller stop, not a deadline', async () => {
     send.mockImplementation((_cmd: any, { abortSignal }: any) => new Promise((_, reject) => {
       abortSignal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });

@@ -14,6 +14,9 @@ import { breakpointsRejected, markBreakpointsRejected } from './openaiPromptCach
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { fileToBedrockDocument } from './fileAttachment.js';
 
+/** Largest delay a Node timer honours (2^31-1 ms); anything above fires after 1 ms. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 export default class BedrockExecutor extends BaseExecutor {
   private client: BedrockRuntimeClient;
   private region: string;
@@ -148,7 +151,11 @@ export default class BedrockExecutor extends BaseExecutor {
     // the request is aborted when it passes and reported as a 'deadline' stop.
     const leftMs = Number.isFinite(options.deadlineAt) ? (options.deadlineAt as number) - Date.now() : Infinity;
     if (leftMs <= 0) throw new StreamAbortError('deadline', '[bedrock] deadline passed before attempt');
-    const deadlineSignal = Number.isFinite(leftMs) ? AbortSignal.timeout(leftMs) : undefined;
+    // AbortSignal.timeout throws ERR_OUT_OF_RANGE on a non-integer delay, and Node
+    // clamps a delay above 2^31-1 ms (~24.8 days) to 1 ms, which would abort at once.
+    const deadlineSignal = Number.isFinite(leftMs)
+      ? AbortSignal.timeout(Math.max(0, Math.min(Math.ceil(leftMs), MAX_TIMER_MS)))
+      : undefined;
     // AbortSignal.any is Node 20.3+; on an older runtime the caller's signal alone still stops it.
     const abortSignal = !deadlineSignal ? options.signal
       : !options.signal ? deadlineSignal

@@ -2011,7 +2011,9 @@ describe('invokeWithFallback — idle retries and deadlineAt per attempt', () =>
         return { message: { role: 'assistant', content: 'ok' }, usage: {} };
       }),
     }));
-    const ex = new TestExecutor(makeConfig(manifest, { executorFactory })) as any;
+    // The follower's provider needs credentials, or the factory could not build it.
+    const credentials = { anthropic: { apiKey: 'test' }, openai: { apiKey: 'test' } };
+    const ex = new TestExecutor(makeConfig(manifest, { executorFactory, credentials })) as any;
     ex.invoke = vi.fn().mockRejectedValueOnce(new StreamAbortError('idle', 'stalled'));
 
     const res = await ex.invokeWithFallback([{ role: 'user', content: 'hi' }], {});

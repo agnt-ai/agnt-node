@@ -582,11 +582,14 @@ export default class BaseExecutor {
       // A model that stalls is left at its first stall when another model can
       // take the turn; the last reachable one keeps its in-place stall retries
       // (an account with no backup is no worse off than before). "Reachable":
-      // same provider as the current client, or any provider once there is an
-      // executorFactory to build one (the cross-provider branch below).
+      // same provider as the current client, or another provider when there is
+      // an executorFactory to build one (the cross-provider branch below) AND
+      // credentials for that provider. Without credentials the factory throws
+      // on construction, so that model cannot take the turn and the stalled one
+      // must keep its retries.
       const fallbackFollows = orderedModels
         .slice(i + 1)
-        .some(m => !!this.executorFactory || m.provider === this.provider);
+        .some(m => m.provider === this.provider || (!!this.executorFactory && !!this.credentials?.[m.provider]));
       const attemptOptions: InvokeOptions = fallbackFollows ? { ...options, idleRetries: 0 } : options;
 
       try {
