@@ -1,0 +1,45 @@
+# Every push to main: build and test every workspace, then publish each published package whose
+# package.json version is not on npm yet (scripts/publish.sh). A merge that bumps a package's version
+# publishes it; a merge that does not publishes nothing, so the workflow is safe to re-run.
+# Order: @agnt-sdk/config first (client and studio depend on it), then @agnt-sdk/client, then @agnt-sdk/studio.
+#
+# Publishing authenticates by npm trusted publishing (OIDC), the same as agnt-ai/simon-protocol's publish
+# workflow: no token, and npm shows the packages as published by GitHub Actions, with provenance. Each
+# package needs this repository and this workflow file (publish.yml) added as a trusted publisher on
+# npmjs.com (package Settings, Trusted publishing) before its first automatic publish.
+name: publish
+on:
+  push:
+    branches: [main]
+  # A re-run after a failure, e.g. once a trusted publisher has been added. Publishes only from main.
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      # npm trusted publishing needs npm 11.5.1 or later; provenance needs a supported Node.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.x
+          cache: npm
+      - run: npm install --global npm@11.19.0
+      # --ignore-scripts: this job holds id-token: write, so no dependency lifecycle script may run in it
+      # (one could request the OIDC token). The flag covers the install only; npm publish still runs each
+      # package's own prepublishOnly.
+      - run: npm ci --ignore-scripts
+      # The root build script builds packages/config before the workspaces that import it.
+      - run: npm run build
+      - run: npm test
+      - run: scripts/publish.sh packages/config packages/client packages/studio
