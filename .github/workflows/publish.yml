@@ -35,7 +35,10 @@ jobs:
           node-version: 24.x
           cache: npm
       - run: npm install --global npm@11.19.0
-      - run: npm ci
+      # --ignore-scripts: this job holds id-token: write, so no dependency lifecycle script may run in it
+      # (one could request the OIDC token). The flag covers the install only; npm publish still runs each
+      # package's own prepublishOnly.
+      - run: npm ci --ignore-scripts
       # The root build script builds packages/config before the workspaces that import it.
       - run: npm run build
       - run: npm test
