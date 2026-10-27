@@ -92,6 +92,8 @@ export default class BaseExecutor {
   protected modelPricing?: ModelPricing;
   protected initialToolChoice: 'auto' | 'required' | 'none' | string;
   protected disableCache: boolean;
+  /** Epoch ms of the caller's wall (BaseExecutorConfig.deadlineAt), or undefined. */
+  protected deadlineAt?: number;
   protected hooks?: HookRegistry;
 
   constructor(config: BaseExecutorConfig) {
@@ -112,6 +114,7 @@ export default class BaseExecutor {
       executorFactory,
       modelPricing,
       disableCache = false,
+      deadlineAt,
     } = config;
     this.baseConfig = config;
     this.manifest = manifest;
@@ -139,6 +142,7 @@ export default class BaseExecutor {
     this.executorFactory = executorFactory;
     if (modelPricing) this.modelPricing = modelPricing;
     this.disableCache = disableCache;
+    if (Number.isFinite(deadlineAt)) this.deadlineAt = deadlineAt;
 
     // Select primary model from spec (respects routing strategy + conditions)
     const primaryModel = this.selectPrimaryModel();
@@ -382,10 +386,9 @@ export default class BaseExecutor {
 
   // Provider adapters call this to classify a mid-stream failure for retry.
   protected isRetryableError(error: any): boolean {
-    // A streamed attempt that exhausted its in-place retries on an IDLE stall is
-    // a model-health signal — fall back to the next model. A backstop (a stream
-    // that dribbled to the absolute ceiling) or an external abort (caller stop)
-    // is terminal: don't waste another model on it.
+    // A stalled stream (idle) is a model-health signal — fall back to the next
+    // model. The backstop, the caller's deadline and its stop (external) are
+    // decided by isFallbackEligible / the caller, not retried here.
     if (error instanceof StreamAbortError) return error.reason === 'idle';
     // HTTP status codes from Anthropic, OpenAI, Google, etc.
     const status = typeof error?.status === 'number' ? error.status : undefined;
@@ -423,10 +426,16 @@ export default class BaseExecutor {
    * precisely so a provider that's down, misconfigured, or out of credits
    * doesn't take the whole run down — "we have backups for exactly this
    * reason" — so the default is yes, fall back, for any reason. The only
-   * carve-out is a genuine user-initiated stop (or a stream that already
-   * burned the absolute time ceiling): spinning up more provider calls after
-   * the caller asked to stop, or after already spending the maximum allowed
-   * time on one model, would ignore that signal rather than serve it.
+   * carve-outs are the caller's own: a genuine user-initiated stop, or the
+   * caller's deadline (deadlineAt) having passed. Spinning up more provider
+   * calls after either would ignore that signal rather than serve it.
+   *
+   * A stream that dribbled to the absolute backstop falls back when the caller
+   * passed deadlineAt (it used to end the turn): on 2026-10-19 one model slowed
+   * down for everyone while its backup stayed healthy, and a turn that sat out
+   * the backstop on the slow model never tried the backup. The deadline bounds
+   * the total, lowering every attempt's ceiling to the time left. With no
+   * deadline the backstop stays terminal, so N models cannot each spend it.
    *
    * This is intentionally a SEPARATE, broader check from isRetryableError,
    * which stays narrow (network blips, overload, rate limits) because it
@@ -462,18 +471,31 @@ export default class BaseExecutor {
    * silently disables the backup chain, which is the exact failure this
    * change exists to remove, so this carve-out stays narrow and typed.
    */
-  protected isFallbackEligible(error: any): boolean {
-    if (error instanceof StreamAbortError) return error.reason === 'idle';
+  protected isFallbackEligible(error: any, options: InvokeOptions = {}): boolean {
+    if (error instanceof StreamAbortError) {
+      if (error.reason === 'idle') return true;
+      // The backstop hops only for a caller that bounds the total (deadlineAt).
+      // Without one, N models x the 10-minute backstop is unbounded by design.
+      if (error.reason === 'backstop') return Number.isFinite(options.deadlineAt);
+      return false;
+    }
     return true;
+  }
+
+  /** True once the caller's deadline (options.deadlineAt) has passed. */
+  protected deadlinePassed(options: InvokeOptions): boolean {
+    return Number.isFinite(options.deadlineAt) && Date.now() >= (options.deadlineAt as number);
   }
 
   /**
    * Invoke with automatic model fallback.
    *
    * Tries models in fallbackOrder. On any failure of a model — except a
-   * genuine user-initiated stop or a stream that hit its absolute time
-   * ceiling, see isFallbackEligible — it switches to the next model in the
-   * list and retries. Same-provider fallback (e.g. claude-opus → claude-
+   * genuine user-initiated stop or the caller's deadline, see
+   * isFallbackEligible — it switches to the next model in the list and
+   * retries. A stalled stream moves on at its FIRST idle stall whenever a
+   * reachable model follows (idleRetries 0); only the last model waits out
+   * its in-place stall retries. Same-provider fallback (e.g. claude-opus → claude-
    * sonnet) reuses this client by pointing this.model at the next model.
    * Cross-provider fallback (e.g. claude-opus → gpt-5) can't reuse the
    * client — it spawns a provider-correct executor via the injected
@@ -497,6 +519,7 @@ export default class BaseExecutor {
     // are almost always already well-formed, so this is a scan with no clone.
     messages = deepWellForm(messages);
     if (options.tools) options = { ...options, tools: deepWellForm(options.tools) };
+    if (!Number.isFinite(options.deadlineAt) && this.deadlineAt !== undefined) options = { ...options, deadlineAt: this.deadlineAt };
 
     // Reset to the originally-selected primary model at the start of every
     // turn. This executor instance is reused across a multi-turn tool loop —
@@ -542,9 +565,32 @@ export default class BaseExecutor {
       // (random/conditional) keep their existing behavior.
       const crossProvider = i > 0 && modelConfig.provider !== this.provider;
 
+      // Past the caller's deadline nothing more is tried, on this model or any
+      // other: the caller has to stop (a worker hands the run off before its
+      // Lambda wall), and another call would only be killed with it.
+      if (this.deadlinePassed(options)) {
+        const late = new StreamAbortError('deadline', '[BaseExecutor] deadline passed — no further model attempts');
+        if (lastError) Object.assign(late, { cause: lastError });
+        attachTrail(late, lastMember ?? modelConfig);
+        throw late;
+      }
+
       if (i > 0) {
         this.log(`[BaseExecutor] ${orderedModels[i - 1].model} failed — falling back to ${modelConfig.provider}/${modelConfig.model}`);
       }
+
+      // A model that stalls is left at its first stall when another model can
+      // take the turn; the last reachable one keeps its in-place stall retries
+      // (an account with no backup is no worse off than before). "Reachable":
+      // same provider as the current client, or another provider when there is
+      // an executorFactory to build one (the cross-provider branch below) AND
+      // credentials for that provider. Without credentials the factory throws
+      // on construction, so that model cannot take the turn and the stalled one
+      // must keep its retries.
+      const fallbackFollows = orderedModels
+        .slice(i + 1)
+        .some(m => m.provider === this.provider || (!!this.executorFactory && !!this.credentials?.[m.provider]));
+      const attemptOptions: InvokeOptions = fallbackFollows ? { ...options, idleRetries: 0 } : options;
 
       try {
         if (crossProvider) {
@@ -563,7 +609,7 @@ export default class BaseExecutor {
             manifest: { ...this.manifest, spec: { ...this.manifest.spec, models: [modelConfig] } },
             messages,
           });
-          const subResult = await sub.invoke(messages, options);
+          const subResult = await sub.invoke(messages, attemptOptions);
           // Sync provider/model state onto `this` so downstream attribution
           // (sendTurnTrace's model field, calculateCost's pricing lookup) reflects
           // the model that actually served this turn, not the original primary —
@@ -582,7 +628,7 @@ export default class BaseExecutor {
           this.provider = modelConfig.provider;
           this.model = modelConfig.model;
         }
-        const okResult = await this.invoke(messages, options);
+        const okResult = await this.invoke(messages, attemptOptions);
         return failureTrail.length ? { ...okResult, fallbackTrail: [...failureTrail] } : okResult;
       } catch (error: any) {
         // Shape-independent stop check, ahead of any error classification.
@@ -598,7 +644,7 @@ export default class BaseExecutor {
         failureTrail.push(trailEntry(modelConfig, error, { cancelled: stopped }));
         if (stopped) { attachTrail(error, modelConfig); throw error; }
 
-        if (this.isFallbackEligible(error)) {
+        if (this.isFallbackEligible(error, options)) {
           this.log(`[BaseExecutor] ${modelConfig.model} failed (${error?.message ?? error}) — trying next model`);
           failures.push({ model: modelConfig.model, error });
           lastError = error;

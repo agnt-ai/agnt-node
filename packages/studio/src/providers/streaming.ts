@@ -24,20 +24,26 @@ export const STREAM_IDLE_TIMEOUT_MS =
   Number(process.env.AGNT_STREAM_IDLE_TIMEOUT_MS) || 60_000;
 
 /** Absolute per-attempt ceiling. Only the pathological dribble case reaches it;
- *  a steadily-streaming multi-minute response never does. It is TERMINAL (not
- *  retried) so a misbehaving stream can't be retried 3× and blow the worker's
- *  14-min checkpoint. Comfortably above any legitimate single-turn duration. */
+ *  a steadily-streaming multi-minute response never does. Never retried on the
+ *  same model. A caller that passes `deadlineAt` gets the next model instead
+ *  (the deadline lowers this ceiling to the time left and stops the hops once
+ *  it passes); without one it ends the turn, so the chain cannot multiply it.
+ *  Comfortably above any legitimate single-turn duration. */
 export const STREAM_ABSOLUTE_BACKSTOP_MS =
   Number(process.env.AGNT_STREAM_BACKSTOP_MS) || 600_000;
 
-/** Whole-attempt retries on a transient mid-stream failure (idle stall, network
- *  drop, 5xx after the stream opened). Matches the pre-existing retry budget. */
+/** Whole-attempt retries on a transient mid-stream failure (network drop, 5xx
+ *  after the stream opened), and on an idle stall when no fallback model
+ *  follows. Matches the pre-existing retry budget. */
 export const STREAM_MAX_RETRIES = Number(process.env.AGNT_STREAM_MAX_RETRIES) || 3;
 
-export type StreamAbortReason = 'idle' | 'backstop' | 'external';
+export type StreamAbortReason = 'idle' | 'backstop' | 'deadline' | 'external';
 
-/** Raised when the guard aborts a stream. `reason` decides retry policy:
- *  `idle` is transient (retry); `backstop` and `external` are terminal. */
+/** Raised when the guard aborts a stream. `reason` decides what happens next:
+ *  `idle` and `backstop` are the model's fault (move to the next model; the
+ *  backstop only under a caller deadline);
+ *  `deadline` (the caller's wall) and `external` (the caller's stop) are
+ *  terminal. */
 export class StreamAbortError extends Error {
   reason: StreamAbortReason;
   constructor(reason: StreamAbortReason, message: string) {
@@ -61,6 +67,9 @@ export interface StreamGuard {
 export interface StreamGuardOptions {
   idleTimeoutMs?: number;
   backstopMs?: number;
+  /** Epoch ms of the caller's wall. The attempt's ceiling is the smaller of
+   *  `backstopMs` and the time left; reaching it aborts with `deadline`. */
+  deadlineAt?: number;
   /** The caller's AbortSignal (backend stop/timeout). Aborts the stream with
    *  reason `external` — terminal, never retried. */
   externalSignal?: AbortSignal;
@@ -103,7 +112,11 @@ export function createStreamGuard(opts: StreamGuardOptions = {}): StreamGuard {
     unref(idleTimer);
   };
 
-  backstopTimer = setTimeout(() => abort('backstop'), backstopMs);
+  // One ceiling timer: the backstop, or the caller's deadline when that comes
+  // first (it then names the abort, so the executor knows not to hop).
+  const leftMs = Number.isFinite(opts.deadlineAt) ? (opts.deadlineAt as number) - Date.now() : Infinity;
+  const ceiling: StreamAbortReason = leftMs <= backstopMs ? 'deadline' : 'backstop';
+  backstopTimer = setTimeout(() => abort(ceiling), Math.max(0, Math.min(backstopMs, leftMs)));
   unref(backstopTimer);
 
   if (opts.externalSignal) {
@@ -139,8 +152,15 @@ export function isAbortError(err: any): boolean {
 
 export interface StreamRetryOptions {
   maxRetries?: number;
+  /** In-place retries on an idle stall (default: `maxRetries - 1`). The
+   *  executor passes 0 when a fallback model follows, so a stalled model is
+   *  left on its FIRST stall instead of being waited out three times. */
+  idleRetries?: number;
   idleTimeoutMs?: number;
   backstopMs?: number;
+  /** Epoch ms of the caller's wall (see StreamGuardOptions.deadlineAt). No
+   *  attempt starts past it. */
+  deadlineAt?: number;
   externalSignal?: AbortSignal;
   /** Classify a NON-abort mid-stream error as transient (retry) vs fatal. */
   isRetryable?: (err: any) => boolean;
@@ -149,9 +169,10 @@ export interface StreamRetryOptions {
 
 /**
  * Run one stream `attempt` with a fresh guard, retrying the WHOLE prompt on a
- * transient failure (idle stall or a caller-classified retryable error). The
- * partial output is discarded on failure. Backstop and external aborts are
- * terminal. Bounded by `maxRetries`.
+ * transient failure (a caller-classified retryable error, or an idle stall
+ * while `idleRetries` lasts). The partial output is discarded on failure.
+ * Backstop, deadline and external aborts are never retried here. Bounded by
+ * `maxRetries`.
  */
 export async function streamWithRetry<T>(
   attempt: (guard: StreamGuard) => Promise<T>,
@@ -159,15 +180,20 @@ export async function streamWithRetry<T>(
 ): Promise<T> {
   const maxRetries = opts.maxRetries ?? STREAM_MAX_RETRIES;
   const isRetryable = opts.isRetryable ?? (() => true);
+  let idleRetriesLeft = opts.idleRetries ?? maxRetries - 1;
   let lastError: any;
 
   for (let i = 0; i < maxRetries; i++) {
     if (opts.externalSignal?.aborted) {
       throw new StreamAbortError('external', '[streaming] aborted before attempt');
     }
+    if (Number.isFinite(opts.deadlineAt) && Date.now() >= (opts.deadlineAt as number)) {
+      throw new StreamAbortError('deadline', '[streaming] deadline passed before attempt');
+    }
     const guard = createStreamGuard({
       idleTimeoutMs: opts.idleTimeoutMs,
       backstopMs: opts.backstopMs,
+      deadlineAt: opts.deadlineAt,
       externalSignal: opts.externalSignal,
     });
     try {
@@ -207,13 +233,17 @@ export async function streamWithRetry<T>(
         : err;
       lastError = mapped;
 
-      // Terminal: the caller asked to stop, or the stream dribbled to the
-      // backstop — retrying either would be wrong/wasteful.
+      // Never retried here: the caller asked to stop or hit its wall, or the
+      // stream dribbled to the backstop (the next model is the executor's call).
       if (mapped instanceof StreamAbortError && mapped.reason !== 'idle') {
         throw mapped;
       }
+      // An idle stall is retried in place only while idleRetries lasts: with a
+      // fallback model behind this one the executor passes 0, so a model that
+      // has gone slow for everyone is left on its first stall (2026-10-19:
+      // three 60 s waits on the same stalled model per turn, then the hop).
       const retryable =
-        mapped instanceof StreamAbortError ? mapped.reason === 'idle' : isRetryable(mapped);
+        mapped instanceof StreamAbortError ? idleRetriesLeft-- > 0 : isRetryable(mapped);
       if (!retryable || i === maxRetries - 1) throw mapped;
       opts.log?.(
         `[streaming] attempt ${i + 1}/${maxRetries} failed (${mapped?.message ?? mapped}) — discarding partial, retrying`

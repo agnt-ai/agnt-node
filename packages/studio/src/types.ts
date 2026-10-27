@@ -313,6 +313,11 @@ export interface BaseExecutorConfig {
    *  Use for one-shot calls (QA, analysts, etc.) that have no follow-up
    *  turn to benefit from a cache hit. */
   disableCache?: boolean;
+  /** Epoch ms after which this executor makes no more model calls: every
+   *  stream attempt's ceiling is the smaller of the absolute backstop and the
+   *  time left, and once it passes no fallback model is tried. Set by a caller
+   *  that must stop before a hard wall (a worker's execution timeout). */
+  deadlineAt?: number;
 }
 
 export interface InvokeOptions {
@@ -329,6 +334,13 @@ export interface InvokeOptions {
    *  streaming call so an in-flight token stream stops cleanly. Set by
    *  BaseExecutor from its per-run AbortController (see cancel()). */
   signal?: AbortSignal;
+  /** Epoch ms past which no stream attempt may run (see
+   *  BaseExecutorConfig.deadlineAt). Set by BaseExecutor from its config. */
+  deadlineAt?: number;
+  /** Whole-attempt retries the stream may spend IN PLACE on an idle stall.
+   *  Set by invokeWithFallback: 0 when a fallback model follows (the stall
+   *  moves straight to it), the default when this is the last one. */
+  idleRetries?: number;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

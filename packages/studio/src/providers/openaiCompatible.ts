@@ -193,6 +193,8 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
       },
       {
         externalSignal: options.signal,
+        deadlineAt: options.deadlineAt,
+        idleRetries: options.idleRetries,
         isRetryable: (err) => this.isRetryableError(err),
         log: (m) => this.log(m),
       }
