@@ -24,12 +24,15 @@
  *      this conversation put its tail breakpoint. A request only READS a cache entry at a breakpoint it carries
  *      itself, so the previous turn's tail has to be marked again for this turn to read it. Every earlier tail is
  *      marked, up to MAX_BREAKPOINTS in all: past that the oldest tails lose their marker (only the marker), which
- *      keeps the static system breakpoint inside the 50 the service reads.
+ *      keeps the static system breakpoint inside the marks the service looks through.
  *
  * Write slots: the service writes at most four breakpoints per request, the latest four; earlier-turn breakpoints are
- * read-only and reads consider the latest 50. Here only the tail is new on a turn that follows an assistant turn (the
- * static prefix too on the first request), so the tail write is never crowded out, and the turn-over-turn read (the
- * newest earlier tail) is always among the latest 50.
+ * read-only. Reads look through only the newest four marks of a request (measured on Azure gpt-6.1-sol: with the
+ * first conversation item changed and everything else byte-identical, a request with four marks still reads the
+ * static prefix, one with five reads nothing, at any larger count). A new wake, whose early conversation differs from
+ * the last run's, can only match the static mark, so the static mark has to stay among the newest four. Here only the
+ * tail is new on a turn that follows an assistant turn (the static prefix too on the first request), so the tail
+ * write is never crowded out, and the turn-over-turn read (the newest earlier tail) is always among the newest four.
  *
  * Why explicit and not implicit: implicit adds its own breakpoint on the latest message, which is the per-turn note:
  * one billed write per turn that is never read, using one of the four write slots. Explicit mode with the breakpoints
@@ -61,11 +64,13 @@ const BREAKPOINT = { mode: 'explicit' as const };
 const INPUT_ROLES = new Set(['system', 'developer', 'user']);
 
 /**
- * At most this many breakpoints in a request, the static system one included. The service reads at the latest 50
- * only; keeping under that keeps the static system breakpoint (the oldest) readable in a long run. The oldest earlier
- * tails are the ones left unmarked: a turn reads the newest one.
+ * At most this many breakpoints in a request, the static system one included. The service looks through only the
+ * newest four marks of a request when it reads, so the static system breakpoint (the oldest) stays readable only when
+ * it is one of them: a new wake reads the static prefix at it and nowhere else. The oldest earlier tails are the ones
+ * left unmarked: a turn reads the newest one, and keeps one more behind it. With 48 marks, a run past ~50 function
+ * calls read 0 cached tokens on every new wake (prod, 2026-11).
  */
-export const MAX_BREAKPOINTS = 48;
+export const MAX_BREAKPOINTS = 4;
 
 /** How long a 400 that went away without breakpoints keeps them off for that provider + endpoint + model. */
 export const BREAKPOINT_REJECTION_TTL_MS = 15 * 60 * 1000;

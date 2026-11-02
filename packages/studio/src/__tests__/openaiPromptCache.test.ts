@@ -119,12 +119,17 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureFoundryExecutor
     expect(input.filter((i: any) => i.type === 'reasoning').map((i: any) => i.id)).toEqual(['rs_1', 'rs_2']);
   });
 
-  it('each request is the previous one minus its note plus the new turn, byte for byte (breakpoints included)', async () => {
+  it('each request is the previous one minus its note plus the new turn, byte for byte (markers aside)', async () => {
     stubToolTurns();
-    const sent = await runLoop(new Executor(config(provider, 'gpt-6.1-sol')), 5);
+    const sent = await runLoop(new Executor(config(provider, 'gpt-6.1-sol')), 7);
+    const unmark = (x: any): any => JSON.parse(JSON.stringify(x), (k, v) => (k === 'prompt_cache_breakpoint' ? undefined : v));
     for (let t = 1; t < sent.length; t++) {
       const prev = sent[t - 1].slice(0, -1); // minus the trailing note
-      expect(json(sent[t].slice(0, prev.length)), `request ${t + 1}`).toBe(json(prev));
+      expect(json(unmark(sent[t].slice(0, prev.length))), `request ${t + 1}`).toBe(json(unmark(prev)));
+      // Past the cap the oldest earlier tails lose their marker; nothing but the marker moves.
+      for (let i = 0; i < prev.length; i++) {
+        if (json(sent[t][i]) !== json(prev[i])) expect(breakpointIndexes([prev[i]]).length + breakpointIndexes([sent[t][i]]).length, `item ${i}`).toBe(1);
+      }
       // The previous request's tail breakpoint is still there, so this request can read what that one wrote.
       expect(breakpointIndexes(sent[t])).toContain(prev.length - 1);
     }
@@ -235,14 +240,15 @@ describe.each([['openai', OpenAIExecutor], ['azureFoundry', AzureFoundryExecutor
     } finally { warn.mockRestore(); }
   });
 
-  it('a 70-turn run keeps at most 48 breakpoints: the static system one and the newest tails', async () => {
+  it('a 70-turn run keeps at most 4 breakpoints: the static system one and the newest tails', async () => {
     stubToolTurns();
     const sent = await runLoop(new Executor(config(provider, 'gpt-6.1-sol')), 70);
     for (const input of sent) expect(breakpointIndexes(input).length).toBeLessThanOrEqual(MAX_BREAKPOINTS);
     const input = sent.at(-1)!;
     const bps = breakpointIndexes(input);
     expect(bps).toHaveLength(MAX_BREAKPOINTS);
-    expect(bps[0]).toBe(0); // the static system part is kept, inside the latest 50 the service reads
+    expect(bps[0]).toBe(0); // the static system part is kept, inside the newest four marks the service looks through
+    expect(MAX_BREAKPOINTS).toBe(4); // a fifth mark pushes the static one out of the lookback: a new wake then reads nothing
     expect(bps.at(-1)).toBe(input.length - 2); // the tail
     const prev = sent.at(-2)!.slice(0, -1);
     expect(bps).toContain(prev.length - 1); // the previous request's tail: this turn reads it
