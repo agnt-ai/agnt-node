@@ -225,7 +225,9 @@ executor sends `prompt_cache_options: { mode: 'explicit' }` and places `prompt_c
 before every earlier assistant turn (where earlier requests put theirs, so this one can read them). Trailing messages
 flagged `releaseAfterRead` (per-turn notes) stay after the tail breakpoint. A `function_call_output` that carries one is
 sent as an `input_text` array. `disableCache` keeps only the system breakpoint. Older models get neither parameter.
-At most 48 breakpoints go out (the system one and the newest tails), inside the 50 the service reads. Blank items are
+At most 4 breakpoints go out (the system one and the newest tails). The service looks through only the newest four marks of a
+request, so the system one must stay among them: a new wake, whose early conversation differs, can only match it, and a
+continuing turn matches the previous tail. Blank items are
 never marked; a request left with no breakpoint is sent without `prompt_cache_options` (implicit).
 `metadata.prompt_cache_breakpoints: false` turns this off for a model. A 400 on a request carrying breakpoints is
 retried once without them; when that retry succeeds (a Provisioned deployment, an API without breakpoints) they stay off
