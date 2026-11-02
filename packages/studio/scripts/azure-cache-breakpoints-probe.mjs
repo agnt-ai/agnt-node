@@ -18,8 +18,8 @@
  *   AZURE_FOUNDRY_ENDPOINT=https://<resource>.openai.azure.com/openai/v1 AZURE_FOUNDRY_API_KEY=... \
  *     MODEL=gpt-6.1-sol node scripts/azure-cache-breakpoints-probe.mjs
  *   PROVIDER=openai OPENAI_API_KEY=... MODEL=<gpt-5.6+ model> node scripts/azure-cache-breakpoints-probe.mjs
- * Long run past the 48-breakpoint cap (smaller prefix and outputs keep it to about $1-2 per mode at the rates above):
- *   TURNS=55 PREFIX_TOKENS=4000 OUTPUT_TOKENS=200 AZURE_FOUNDRY_ENDPOINT=... AZURE_FOUNDRY_API_KEY=... MODEL=... node ...
+ * Long run past the 4-breakpoint cap (smaller prefix and outputs keep it to about $1-2 per mode at the rates above):
+ *   TURNS=12 PREFIX_TOKENS=4000 OUTPUT_TOKENS=200 AZURE_FOUNDRY_ENDPOINT=... AZURE_FOUNDRY_API_KEY=... MODEL=... node ...
  * No credentials: OFFLINE=1 runs the same loop against a stub (usage numbers are fake) and still checks the wire bytes.
  * Options (env): TURNS (default 3), MODES (default "before,after"), EFFORT (default low), PREFIX_TOKENS (default
  * 40000: 3/4 system, 1/4 opening user message), OUTPUT_TOKENS (default 3000 per function_call_output), OFFLINE.
