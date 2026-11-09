@@ -124,6 +124,13 @@ describe('agnt eval list', () => {
     });
   });
 
+  it('dates each review by when the run started, not when it was reviewed', async () => {
+    respond(page([review(), review({ _id: 'r2', runStartedAt: undefined })]));
+    await evalList({});
+    expect(printed()).toContain('    2026-09-20 15:00Z  task ');
+    expect(printed()).toContain('    2026-09-21 02:00Z  task ');
+  });
+
   it('--unclassified asks for reviews with no task type', async () => {
     respond(page([]));
     await evalList({ unclassified: true });

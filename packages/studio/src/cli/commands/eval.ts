@@ -218,7 +218,8 @@ export function renderList(view: ListView, params: ListRunReviewsParams, pageHin
       ].join('  '),
     );
     lines.push(
-      `    ${stamp(r.reviewedAt)}  task ${r.task ?? '-'}  chat ${r.chat ?? '-'}  credits ${r.creditsConsumed ?? '?'}` +
+      // When the run started, not when the nightly pass reviewed it; older rows fall back.
+      `    ${stamp(r.runStartedAt ?? r.reviewedAt)}  task ${r.task ?? '-'}  chat ${r.chat ?? '-'}  credits ${r.creditsConsumed ?? '?'}` +
         (sideEffects ? `  ${sideEffects} undesired side effect${sideEffects === 1 ? '' : 's'}` : ''),
     );
     if (v.userPerspective) lines.push(`    "${oneLine(v.userPerspective, SNIPPET_LEN)}"`);
