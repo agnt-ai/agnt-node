@@ -14,6 +14,13 @@ import {
   runSkillPush, runSkillExport, runSkillPublish,
 } from './commands/skill.js';
 import { runWorkflowPush, runWorkflowPull, runWorkflowList } from './commands/workflow.js';
+import {
+  runDataroomWhoami,
+  runDataroomList,
+  runDataroomAdd,
+  runDataroomSet,
+  runDataroomRemove,
+} from './commands/dataroom.js';
 
 const program = new Command();
 
@@ -277,6 +284,71 @@ workflowCmd
   .option('--json', 'Print raw JSON instead of a human-readable list')
   .action(async (opts) => {
     await runWorkflowList(opts);
+  });
+
+const dataroomCmd = program
+  .command('dataroom')
+  .description(
+    'Manage the investor data room access list (AGNT staff) — needs a data room key in AGNT_DATAROOM_KEY or the profile\'s dataroomKey',
+  );
+
+dataroomCmd
+  .command('whoami')
+  .description('Show which key this is and the room it manages')
+  .option('--api-url <url>', 'API base URL (default: AGNT_API_URL, the profile\'s apiUrl, or https://api.agnt.ai)')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON')
+  .action(async (opts) => {
+    await runDataroomWhoami(opts);
+  });
+
+dataroomCmd
+  .command('list')
+  .description('List everyone on the access list with their level (limited or full) and version')
+  .option('--access <level>', 'Only limited or only full')
+  .option('--email <email>', 'Only this email')
+  .option('--api-url <url>', 'API base URL')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON')
+  .action(async (opts) => {
+    await runDataroomList(opts);
+  });
+
+dataroomCmd
+  .command('add [emails...]')
+  .description('Add emails (a pasted dump in any shape, or @domain for a whole fund) as limited, or --full. Never lowers anyone already on the list')
+  .option('--file <path>', 'Read the emails from a file (- for stdin)')
+  .option('--full', 'Give full access (diligence) instead of limited')
+  .option('--room-version <key>', 'Room version for new rows (e.g. 30m), or default')
+  .option('--notes <text>', 'Notes on new rows, e.g. where you met')
+  .option('--api-url <url>', 'API base URL')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON')
+  .action(async (emails, opts) => {
+    await runDataroomAdd(emails ?? [], opts);
+  });
+
+dataroomCmd
+  .command('set <email>')
+  .description('Change one person\'s (or @domain\'s) level or version')
+  .option('--full', 'Give full access')
+  .option('--limited', 'Back to limited access')
+  .option('--room-version <key>', 'Room version (e.g. 30m), or default')
+  .option('--api-url <url>', 'API base URL')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON')
+  .action(async (email, opts) => {
+    await runDataroomSet(email, opts);
+  });
+
+dataroomCmd
+  .command('remove <email>')
+  .description('Take someone (or @domain) off the list; their agent links stop working too')
+  .option('--api-url <url>', 'API base URL')
+  .option('--profile <name>', 'Credentials profile to use')
+  .option('--json', 'Print raw JSON')
+  .action(async (email, opts) => {
+    await runDataroomRemove(email, opts);
   });
 
 program.parse(process.argv);

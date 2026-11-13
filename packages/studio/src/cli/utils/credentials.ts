@@ -12,11 +12,17 @@
  *   [staging]
  *   apiUrl = https://staging-api.agnt.ai
  *   apiKey = ak_live_...
+ *
+ * A profile may also hold a data room key for `agnt dataroom` (AGNT staff
+ * only; it manages the investor data room's access list and nothing else):
+ *
+ *   dataroomKey = drk_...
  */
 
 export interface Profile {
   apiUrl: string;
   apiKey: string;
+  dataroomKey?: string;
 }
 
 function credentialsPath(homedir: string, join: (...parts: string[]) => string): string {
@@ -42,7 +48,7 @@ function parseCredentials(raw: string): Record<string, Profile> {
     if (kv && current) {
       const key = kv[1].trim();
       const value = kv[2].trim();
-      if (key === 'apiUrl' || key === 'apiKey') {
+      if (key === 'apiUrl' || key === 'apiKey' || key === 'dataroomKey') {
         profiles[current][key] = value;
       }
     }
@@ -53,7 +59,11 @@ function parseCredentials(raw: string): Record<string, Profile> {
 
 function serializeCredentials(profiles: Record<string, Profile>): string {
   return Object.entries(profiles)
-    .map(([name, profile]) => `[${name}]\napiUrl = ${profile.apiUrl}\napiKey = ${profile.apiKey}\n`)
+    .map(
+      ([name, profile]) =>
+        `[${name}]\napiUrl = ${profile.apiUrl}\napiKey = ${profile.apiKey}\n` +
+        (profile.dataroomKey ? `dataroomKey = ${profile.dataroomKey}\n` : ''),
+    )
     .join('\n');
 }
 
@@ -77,6 +87,15 @@ async function readAllProfiles(): Promise<Record<string, Profile>> {
  */
 export function resolveProfileName(explicit?: string): string {
   return explicit || process.env.AGNT_PROFILE || 'default';
+}
+
+/**
+ * One profile as stored, or null when there is none. Unlike resolveProfile it
+ * does not need an apiKey: `agnt dataroom` reads only apiUrl and dataroomKey.
+ */
+export async function readProfile(name: string): Promise<Profile | null> {
+  const profiles = await readAllProfiles();
+  return profiles[name] ?? null;
 }
 
 /**
@@ -112,7 +131,8 @@ export async function saveProfile(name: string, profile: Profile): Promise<void>
   await mkdir(dirname(path), { recursive: true });
 
   const profiles = await readAllProfiles();
-  profiles[name] = profile;
+  // Keep what this write does not name (a dataroomKey survives `agnt configure`).
+  profiles[name] = { ...profiles[name], ...profile };
 
   await writeFile(path, serializeCredentials(profiles), { encoding: 'utf-8', mode: 0o600 });
   // Existing files aren't re-created (no O_CREAT mode applied), so an
