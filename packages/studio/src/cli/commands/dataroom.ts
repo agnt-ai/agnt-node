@@ -100,6 +100,7 @@ export async function dataroomClient(opts: DataroomOptions = {}): Promise<Dataro
     );
   }
   const apiUrl = (opts.apiUrl || process.env.AGNT_API_URL || profile?.apiUrl || DEFAULT_API_URL).replace(/\/$/, '');
+  assertSafeApiUrl(apiUrl);
 
   return {
     apiUrl,
@@ -119,6 +120,23 @@ export async function dataroomClient(opts: DataroomOptions = {}): Promise<Dataro
       return data as T;
     },
   };
+}
+
+/**
+ * The key goes only over https, or plain http to this machine (a local API).
+ * A typo or a hostile AGNT_API_URL must not send a drk_ key in clear text.
+ */
+export function assertSafeApiUrl(apiUrl: string): void {
+  let url: URL;
+  try {
+    url = new URL(apiUrl);
+  } catch {
+    throw new Error(`Not a valid API URL: ${apiUrl}`);
+  }
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) {
+    throw new Error(`Refusing to send the data room key to ${url.origin}: use https (plain http only for localhost).`);
+  }
 }
 
 /** The one grant for this email (or `@domain`), or null. */

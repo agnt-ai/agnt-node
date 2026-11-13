@@ -156,6 +156,17 @@ describe('agnt dataroom', () => {
     expect(calls()).toHaveLength(1);
   });
 
+  it('never sends the key over plain http, except to this machine', async () => {
+    process.env.AGNT_API_URL = 'http://api.agnt.ai';
+    await expect(runDataroomList()).rejects.toThrow('exit 1');
+    expect(errs.join('\n')).toContain('use https');
+    expect(fetchMock).not.toHaveBeenCalled();
+    process.env.AGNT_API_URL = 'http://127.0.0.1:4000';
+    fetchMock.mockResolvedValue(json({ ok: true, entries: [] }));
+    await runDataroomList();
+    expect(calls()[0].url).toBe('http://127.0.0.1:4000/dataroom-admin/access');
+  });
+
   it('a refused key says it is wrong, expired or revoked', async () => {
     fetchMock.mockResolvedValue(json({ ok: false, error: 'Unauthorized' }, 401));
     await expect(runDataroomList()).rejects.toThrow('exit 1');
