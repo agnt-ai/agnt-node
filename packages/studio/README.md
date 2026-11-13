@@ -149,6 +149,23 @@ Server-managed fields (`id`, `origin`, `tier`, `createdBy`, `account`, `follower
 - `workflowStatus` is honoured on create (verified on staging: `"paused"` comes back `"disabled"` and is not scheduled). `status`, `followers`, `silentOnNoOp`, `processingBufferMs` and `skillCollection` are, however, ignored on create (a warning is printed when they are non-default).
 - `list` shows one row per install, so a workflow installed more than once can appear twice; this comes from `GET /skills`, not the CLI.
 
+### `agnt dataroom` — the investor data room's access list (AGNT staff)
+
+Adds, upgrades and removes investors on the access list for the investor data room. Each person (or `@domain`, for a whole fund) is `limited` (the leave-behind: memo, deck, plan summaries; diligence items show as locked) or `full` (diligence: cap table, corporate documents, detailed financials, security PDFs).
+
+It uses a data room key (`drk_...`), not an API key. AGNT staff create one in agnt-console under Admin → Dataroom access → CLI keys. A key manages this list and nothing else, expires within 90 days by default, and every use is logged. Put it in `AGNT_DATAROOM_KEY`, or add `dataroomKey = drk_...` to a profile in `~/.agnt/credentials`. The API URL is `--api-url`, `AGNT_API_URL`, the profile's `apiUrl`, or `https://api.agnt.ai`.
+
+```bash
+agnt dataroom whoami
+agnt dataroom add "Jane <jane@fund.com>, bob@other.vc" @examplefund.com --notes "demo day"   # limited
+agnt dataroom add --file investors.txt --full          # any dump: a CSV column, a To: line; --file - reads stdin
+agnt dataroom set jane@fund.com --full                 # or --limited, --room-version 30m|default
+agnt dataroom list [--access limited|full] [--json]
+agnt dataroom remove bob@other.vc                      # their agent links stop working too
+```
+
+Adding never lowers anyone: someone already on the list keeps their level, version and notes, and `add --full` only ever raises a level. To lower one, use `set --limited`.
+
 ## Programmatic use
 
 ### `AgntExecutor`
