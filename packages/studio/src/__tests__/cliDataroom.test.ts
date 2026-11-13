@@ -68,8 +68,8 @@ afterEach(() => {
 
 describe('extractEmails', () => {
   it('pulls clean addresses out of a messy paste', () => {
-    const dump = 'Jane Doe <Jane@Fund.com>, bob@other.vc; "Ann" ann@x.io\njane@fund.com\nnope, also@bad\n@acrewcapital.com';
-    expect(extractEmails(dump)).toEqual(['@acrewcapital.com', 'jane@fund.com', 'bob@other.vc', 'ann@x.io']);
+    const dump = 'Jane Doe <Jane@Fund.com>, bob@other.vc; "Ann" ann@x.io\njane@fund.com\nnope, also@bad\n@examplefund.com';
+    expect(extractEmails(dump)).toEqual(['@examplefund.com', 'jane@fund.com', 'bob@other.vc', 'ann@x.io']);
   });
 });
 

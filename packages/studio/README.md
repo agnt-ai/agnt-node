@@ -157,7 +157,7 @@ It uses a data room key (`drk_...`), not an API key. AGNT staff create one in ag
 
 ```bash
 agnt dataroom whoami
-agnt dataroom add "Jane <jane@fund.com>, bob@other.vc" @acrewcapital.com --notes "demo day"   # limited
+agnt dataroom add "Jane <jane@fund.com>, bob@other.vc" @examplefund.com --notes "demo day"   # limited
 agnt dataroom add --file investors.txt --full          # any dump: a CSV column, a To: line; --file - reads stdin
 agnt dataroom set jane@fund.com --full                 # or --limited, --room-version 30m|default
 agnt dataroom list [--access limited|full] [--json]
