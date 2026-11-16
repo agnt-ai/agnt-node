@@ -5,6 +5,7 @@ import {
   fileToGeminiPart,
   fileToBedrockDocument,
   bedrockDocName,
+  fileToTextNote,
 } from '../fileAttachment.js';
 
 const pdf = (filename?: string) => ({
@@ -84,5 +85,19 @@ describe('bedrockDocName', () => {
   it('falls back to "document" when empty', () => {
     expect(bedrockDocName('')).toBe('document');
     expect(bedrockDocName('***.pdf')).toBe('document');
+  });
+});
+
+describe('fileToTextNote', () => {
+  it('names the file and its media type', () => {
+    expect(fileToTextNote(pdf('report.pdf'))).toEqual({
+      type: 'text',
+      text: '[Attached file: report.pdf (application/pdf). This model cannot read attachments; use a tool to read it if needed.]',
+    });
+  });
+  it('still produces a note without a filename or a data URL', () => {
+    expect(fileToTextNote(pdf()).text).toContain('unnamed file (application/pdf)');
+    expect(fileToTextNote({ type: 'file', file: { filename: 'x.pdf', file_id: 'f1' } }).text)
+      .toContain('[Attached file: x.pdf. ');
   });
 });

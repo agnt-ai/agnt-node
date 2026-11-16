@@ -30,6 +30,7 @@
 import OpenAI from 'openai';
 import BaseExecutor from '../BaseExecutor.js';
 import { withFlatSystemMessages } from './systemContent.js';
+import { fileToTextNote } from './fileAttachment.js';
 import { promptCacheCapability, withoutCacheControlMetadata } from './promptCacheCapabilities.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { streamWithRetry, consumeOpenAIStream, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
@@ -351,7 +352,7 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
   #formatMessages(messages: Message[]): any[] {
     return messages.map(msg => {
       if (msg.role === 'tool') {
-        return { role: 'tool', tool_call_id: msg.tool_call_id, content: msg.content };
+        return { role: 'tool', tool_call_id: msg.tool_call_id, content: this.#formatContent(msg.content) };
       }
       // An assistant message that made tool calls MUST carry them back in
       // OpenAI wire format when the history is replayed on the next turn —
@@ -363,7 +364,7 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
         return {
           role: 'assistant',
-          content: msg.content ?? '',
+          content: this.#formatContent(msg.content ?? ''),
           tool_calls: msg.tool_calls.map(tc => ({
             id: tc.id,
             type: 'function',
@@ -374,8 +375,22 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
           })),
         };
       }
-      return { role: msg.role, content: msg.content };
+      return { role: msg.role, content: this.#formatContent(msg.content) };
     });
+  }
+
+  /**
+   * Translate content parts these hosts can't take. The canonical `file` block
+   * (fileAttachment.ts) is OpenAI Chat Completions native, but none of the hosts
+   * routed here (Together, Fireworks, DeepInfra, DeepSeek, Moonshot, xAI, Groq,
+   * Mistral) accept a `file` part: Moonshot/Together 400 the whole request with
+   * "contains an invalid part type: file", even for a valid PDF. So each file
+   * becomes a text note naming it, and the turn still runs. Every other part
+   * (text, image_url) passes through unchanged.
+   */
+  #formatContent(content: any): any {
+    if (!Array.isArray(content)) return content;
+    return content.map(part => (part?.type === 'file' ? fileToTextNote(part) : part));
   }
 
   /** Format a tool definition to OpenAI format from any of our known shapes. */

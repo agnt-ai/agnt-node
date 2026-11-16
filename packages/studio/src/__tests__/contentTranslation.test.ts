@@ -43,6 +43,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
 }));
 
 import OpenAIExecutor from '../providers/openai.js';
+import OpenAICompatibleExecutor from '../providers/openaiCompatible.js';
 import GoogleExecutor from '../providers/google.js';
 import AnthropicExecutor from '../providers/anthropic.js';
 import type { BaseExecutorConfig, PromptManifestV2 } from '../types.js';
@@ -124,5 +125,48 @@ describe('OpenAI adapter translation', () => {
     const content = openaiCreate.mock.calls[0][0].messages[0].content;
     expect(content).toContainEqual({ type: 'image_url', image_url: { url: IMG } });
     expect(content).toContainEqual({ type: 'file', file: { filename: 'report.pdf', file_data: PDF } });
+  });
+});
+
+describe('OpenAI-compatible adapter translation', () => {
+  const okStream = async () =>
+    openAIStreamFromCompletion({
+      choices: [{ message: { role: 'assistant', content: 'ok' } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    });
+
+  it.each([
+    ['moonshot', 'kimi-k3'],
+    ['together', 'moonshotai/Kimi-K3'],
+  ])('%s: file → text note (hosts reject file parts); text and image_url unchanged', async (provider, model) => {
+    openaiCreate.mockImplementation(okStream);
+    const ex = new OpenAICompatibleExecutor(makeConfig(provider, model, { [provider]: { apiKey: 'k' } }));
+    await ex.invoke(multimodalTurn as any);
+
+    const sent = openaiCreate.mock.calls[0][0].messages;
+    expect(sent).toEqual([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'look at these' },
+        { type: 'image_url', image_url: { url: IMG } },
+        {
+          type: 'text',
+          text: '[Attached file: report.pdf (application/pdf). This model cannot read attachments; use a tool to read it if needed.]',
+        },
+      ],
+    }]);
+    expect(JSON.stringify(sent)).not.toContain('"type":"file"');
+    expect(JSON.stringify(sent)).not.toContain('JVBERi0x');
+  });
+
+  it('leaves string content and file-free arrays untouched', async () => {
+    openaiCreate.mockImplementation(okStream);
+    const ex = new OpenAICompatibleExecutor(makeConfig('together', 'moonshotai/Kimi-K3', { together: { apiKey: 'k' } }));
+    const parts = [{ type: 'text', text: 'a' }, { type: 'image_url', image_url: { url: IMG } }];
+    await ex.invoke([{ role: 'user', content: 'plain' }, { role: 'user', content: parts }] as any);
+
+    const sent = openaiCreate.mock.calls[0][0].messages;
+    expect(sent[0]).toEqual({ role: 'user', content: 'plain' });
+    expect(sent[1]).toEqual({ role: 'user', content: parts });
   });
 });

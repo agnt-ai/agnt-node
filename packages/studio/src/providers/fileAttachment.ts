@@ -87,3 +87,19 @@ export function fileToBedrockDocument(item: any): any | null {
     },
   };
 }
+
+/**
+ * A plain text block standing in for a file the provider cannot take as a
+ * content part (the OpenAI-compatible hosts reject any `file` part with a 400,
+ * even a valid PDF). Names the file so the model knows it exists and can reach
+ * for a tool instead of failing the whole turn.
+ */
+export function fileToTextNote(item: any): { type: 'text'; text: string } {
+  const filename = typeof item?.file?.filename === 'string' && item.file.filename ? item.file.filename : 'unnamed file';
+  const mediaType = parseBase64DataUrl(fileDataUrl(item))?.mediaType;
+  const label = mediaType ? `${filename} (${mediaType})` : filename;
+  return {
+    type: 'text',
+    text: `[Attached file: ${label}. This model cannot read attachments; use a tool to read it if needed.]`,
+  };
+}
