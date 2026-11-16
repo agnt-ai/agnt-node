@@ -89,6 +89,17 @@ export function fileToBedrockDocument(item: any): any | null {
 }
 
 /**
+ * The file's id when the part carries one: OpenAI's `file.file_id` (or a
+ * camelCase `file.fileId`), or a `fileId`/`file_id` on the part itself.
+ */
+function fileIdOf(item: any): string | null {
+  for (const v of [item?.file?.file_id, item?.file?.fileId, item?.fileId, item?.file_id]) {
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+/**
  * A plain text block standing in for a file the provider cannot take as a
  * content part (the OpenAI-compatible hosts reject any `file` part with a 400,
  * even a valid PDF). Names the file so the model knows it exists and can reach
@@ -98,8 +109,9 @@ export function fileToTextNote(item: any): { type: 'text'; text: string } {
   const filename = typeof item?.file?.filename === 'string' && item.file.filename ? item.file.filename : 'unnamed file';
   const mediaType = parseBase64DataUrl(fileDataUrl(item))?.mediaType;
   const label = mediaType ? `${filename} (${mediaType})` : filename;
+  const fileId = fileIdOf(item);
   return {
     type: 'text',
-    text: `[Attached file: ${label}. This model cannot read attachments; use a tool to read it if needed.]`,
+    text: `[Attached file: ${label}${fileId ? `, fileId ${fileId}` : ''}. This model cannot read attachments; use a tool to read it if needed.]`,
   };
 }

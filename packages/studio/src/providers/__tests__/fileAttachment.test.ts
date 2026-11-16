@@ -97,7 +97,20 @@ describe('fileToTextNote', () => {
   });
   it('still produces a note without a filename or a data URL', () => {
     expect(fileToTextNote(pdf()).text).toContain('unnamed file (application/pdf)');
-    expect(fileToTextNote({ type: 'file', file: { filename: 'x.pdf', file_id: 'f1' } }).text)
+    expect(fileToTextNote({ type: 'file', file: { filename: 'x.pdf' } }).text)
       .toContain('[Attached file: x.pdf. ');
+  });
+  it('includes the file id when the part carries one', () => {
+    expect(fileToTextNote({ type: 'file', file: { filename: 'report.pdf', file_id: 'f1', file_data: 'data:application/pdf;base64,JVBERi0x' } })).toEqual({
+      type: 'text',
+      text: '[Attached file: report.pdf (application/pdf), fileId f1. This model cannot read attachments; use a tool to read it if needed.]',
+    });
+    expect(fileToTextNote({ type: 'file', file: { filename: 'x.pdf', fileId: 'f2' } }).text).toContain('[Attached file: x.pdf, fileId f2. ');
+    expect(fileToTextNote({ type: 'file', fileId: 'f3', file: { filename: 'x.pdf' } }).text).toContain(', fileId f3. ');
+    expect(fileToTextNote({ type: 'file', file_id: 'f4', file: { filename: 'x.pdf' } }).text).toContain(', fileId f4. ');
+  });
+  it('leaves the id out when it is blank or not a string', () => {
+    expect(fileToTextNote({ type: 'file', file: { filename: 'x.pdf', file_id: '  ' } }).text).not.toContain('fileId');
+    expect(fileToTextNote({ type: 'file', file: { filename: 'x.pdf', file_id: 42 } }).text).not.toContain('fileId');
   });
 });
