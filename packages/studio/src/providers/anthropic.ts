@@ -301,7 +301,9 @@ export default class AnthropicExecutor extends BaseExecutor {
         cache_read_input_tokens: usageTyped.cache_read_input_tokens ?? 0,
         cache_creation_input_tokens: usageTyped.cache_creation_input_tokens ?? 0,
         ...(typeof thinkingTokens === 'number' ? { reasoning_output_tokens: thinkingTokens } : {})
-      }
+      },
+      // Verbatim, uninterpreted (see InvokeResult.stopReason): `refusal` is how a declined request ends.
+      ...(typeof response.stop_reason === 'string' ? { stopReason: response.stop_reason } : {})
     };
   }
 

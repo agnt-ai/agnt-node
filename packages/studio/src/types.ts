@@ -157,8 +157,13 @@ export interface InvokeResult {
    *  anywhere in the payload — so no error-message pattern can detect it. The
    *  string is transported UNINTERPRETED: deciding what a given stopReason
    *  means (retry, park, surface to the user) is the caller's policy, not this
-   *  package's. */
+   *  package's. Anthropic (`stop_reason`), Chat Completions (`finish_reason`)
+   *  and Responses (`incomplete_details.reason`) report theirs here too. */
   stopReason?: string;
+  /** The provider's own refusal text, verbatim, when it declined the request:
+   *  Chat Completions `message.refusal`, Responses `refusal` content parts.
+   *  Undefined when the provider sent none. */
+  refusal?: string;
   /** Earlier chain members that failed before this one succeeded (invokeWithFallback). */
   fallbackTrail?: FallbackTrailEntry[];
 }

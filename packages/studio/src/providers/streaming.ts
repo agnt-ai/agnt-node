@@ -273,8 +273,11 @@ export interface OpenAICompletionLike {
        *  executor can fall back to it when `content` comes back empty on a
        *  productive `stop` turn. Undefined for providers that never emit it. */
       reasoning_content?: string | null;
+      /** The model's refusal text (`delta.refusal` when streamed). */
+      refusal?: string | null;
       tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
     };
+    finish_reason?: string | null;
   }>;
   usage?: any;
 }
@@ -303,6 +306,8 @@ export async function consumeOpenAIStream(
   let reasoning = '';
   let sawReasoning = false;
   let usage: any = undefined;
+  let refusal = '';
+  let finishReason: string | undefined;
   const byIndex = new Map<number, { id: string; name: string; args: string }>();
 
   for await (const chunk of stream) {
@@ -319,6 +324,8 @@ export async function consumeOpenAIStream(
         reasoning += delta.reasoning_content;
         sawReasoning = true;
       }
+      if (typeof delta.refusal === 'string') refusal += delta.refusal;
+      if (typeof choice.finish_reason === 'string') finishReason = choice.finish_reason;
       if (Array.isArray(delta.tool_calls)) {
         for (const tc of delta.tool_calls) {
           const idx = typeof tc.index === 'number' ? tc.index : 0;
@@ -354,8 +361,10 @@ export async function consumeOpenAIStream(
         role,
         content: sawContent ? content : (tool_calls ? null : ''),
         reasoning_content: sawReasoning ? reasoning : undefined,
+        ...(refusal ? { refusal } : {}),
         tool_calls,
       },
+      ...(finishReason ? { finish_reason: finishReason } : {}),
     }],
     usage,
   };

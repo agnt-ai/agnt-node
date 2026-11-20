@@ -34,6 +34,7 @@ import { fileToTextNote } from './fileAttachment.js';
 import { promptCacheCapability, withoutCacheControlMetadata } from './promptCacheCapabilities.js';
 import type { BaseExecutorConfig, Message, InvokeOptions, InvokeResult } from '../types.js';
 import { streamWithRetry, consumeOpenAIStream, STREAM_ABSOLUTE_BACKSTOP_MS } from './streaming.js';
+import { chatStopFields } from './stopReason.js';
 
 /** Known OpenAI-compatible provider base URLs. A provider not listed here is
  *  still usable by supplying baseURL via credentials or model metadata. */
@@ -256,6 +257,7 @@ export default class OpenAICompatibleExecutor extends BaseExecutor {
         cache_read_input_tokens: cachedTokens,
         cache_creation_input_tokens: 0,
       },
+      ...chatStopFields(choice),
     };
   }
 
