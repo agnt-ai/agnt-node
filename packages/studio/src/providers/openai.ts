@@ -25,6 +25,7 @@ import {
   consumeOpenAIResponsesStream,
   STREAM_ABSOLUTE_BACKSTOP_MS,
 } from './streaming.js';
+import { chatStopFields, responsesStopFields } from './stopReason.js';
 
 /**
  * OpenAI's "reasoning family" models (o-series: o1, o3, o4, ...; gpt-5.x)
@@ -232,7 +233,8 @@ export default class OpenAIExecutor extends BaseExecutor {
       usage: {
         ...cacheBuckets,
         output_tokens: completionTokens,
-      }
+      },
+      ...chatStopFields(choice),
     };
   }
 
@@ -538,6 +540,7 @@ export default class OpenAIExecutor extends BaseExecutor {
         output_tokens: outputTokens,
         ...(typeof reasoningTokens === 'number' ? { reasoning_output_tokens: reasoningTokens } : {}),
       },
+      ...responsesStopFields(response),
     };
   }
 

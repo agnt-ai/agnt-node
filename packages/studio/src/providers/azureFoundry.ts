@@ -48,6 +48,7 @@ import {
   consumeOpenAIResponsesStream,
   STREAM_ABSOLUTE_BACKSTOP_MS,
 } from './streaming.js';
+import { chatStopFields, responsesStopFields } from './stopReason.js';
 
 /** Default API version used when credentials.azureFoundry.apiVersion is omitted
  *  AND the endpoint is NOT a v1-style endpoint (Model Inference API only). */
@@ -250,6 +251,7 @@ export default class AzureFoundryExecutor extends BaseExecutor {
         ...cacheBuckets,
         output_tokens: completionTokens,
       },
+      ...chatStopFields(choice),
     };
   }
 
@@ -653,6 +655,7 @@ export default class AzureFoundryExecutor extends BaseExecutor {
         output_tokens: outputTokens,
         ...(typeof reasoningTokens === 'number' ? { reasoning_output_tokens: reasoningTokens } : {}),
       },
+      ...responsesStopFields(response),
     };
   }
 }
